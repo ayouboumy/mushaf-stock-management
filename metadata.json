@@ -1,0 +1,6 @@
+{
+  "name": "مخزون المصاحف",
+  "description": "نظام احترافي لإدارة ومتابعة وتوزيع مخزون المصحف الشريف والكتب الإسلامية وحركات المستودع والتقارير",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
