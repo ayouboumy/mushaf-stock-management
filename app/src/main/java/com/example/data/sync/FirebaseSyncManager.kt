@@ -24,7 +24,10 @@ class FirebaseSyncManager(private val database: AppDatabase) {
 
     private val firestore: FirebaseFirestore by lazy { FirebaseFirestore.getInstance() }
     private val auth: FirebaseAuth by lazy { FirebaseAuth.getInstance() }
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private val coroutineExceptionHandler = kotlinx.coroutines.CoroutineExceptionHandler { _, throwable ->
+        Log.e("FirebaseSync", "Unhandled sync error caught safely", throwable)
+    }
+    private val scope = CoroutineScope(Dispatchers.IO + kotlinx.coroutines.SupervisorJob() + coroutineExceptionHandler)
 
     private val listeners = mutableListOf<ListenerRegistration>()
 
@@ -100,24 +103,28 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                         }
                         if (snapshot != null && !snapshot.isEmpty) {
                             scope.launch {
-                                for (doc in snapshot.documents) {
-                                    val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                                    val entity = ProductEntity(
-                                        id = id,
-                                        nameArabic = doc.getString("nameArabic") ?: "",
-                                        nameFrench = doc.getString("nameFrench") ?: "",
-                                        category = doc.getString("category") ?: "",
-                                        formatType = doc.getString("formatType") ?: "",
-                                        unit = doc.getString("unit") ?: "نسخة",
-                                        packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 1,
-                                        minimumStock = doc.getLong("minimumStock")?.toInt() ?: 0,
-                                        initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
-                                        notes = doc.getString("notes") ?: "",
-                                        active = doc.getBoolean("active") ?: true
-                                    )
-                                    database.productDao().insertProduct(entity)
+                                try {
+                                    for (doc in snapshot.documents) {
+                                        val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
+                                        val entity = ProductEntity(
+                                            id = id,
+                                            nameArabic = doc.getString("nameArabic") ?: "",
+                                            nameFrench = doc.getString("nameFrench") ?: "",
+                                            category = doc.getString("category") ?: "",
+                                            formatType = doc.getString("formatType") ?: "",
+                                            unit = doc.getString("unit") ?: "نسخة",
+                                            packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 1,
+                                            minimumStock = doc.getLong("minimumStock")?.toInt() ?: 0,
+                                            initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
+                                            notes = doc.getString("notes") ?: "",
+                                            active = doc.getBoolean("active") ?: true
+                                        )
+                                        database.productDao().insertProduct(entity)
+                                    }
+                                    _lastSyncTimestamp.value = System.currentTimeMillis()
+                                } catch (e: Exception) {
+                                    Log.e("FirebaseSync", "Error syncing products from Firestore", e)
                                 }
-                                _lastSyncTimestamp.value = System.currentTimeMillis()
                             }
                         }
                     }
@@ -132,32 +139,36 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                         }
                         if (snapshot != null && !snapshot.isEmpty) {
                             scope.launch {
-                                for (doc in snapshot.documents) {
-                                    val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                                    val entity = StockMovementEntity(
-                                        id = id,
-                                        productId = doc.getLong("productId") ?: 0L,
-                                        variantId = doc.getLong("variantId"),
-                                        movementType = doc.getString("movementType") ?: "STOCK_IN",
-                                        quantity = doc.getLong("quantity")?.toInt() ?: 0,
-                                        packageCount = doc.getLong("packageCount")?.toInt() ?: 0,
-                                        dateMillis = doc.getLong("dateMillis") ?: System.currentTimeMillis(),
-                                        dateFormatted = doc.getString("dateFormatted") ?: "",
-                                        source = doc.getString("source") ?: "",
-                                        destinationId = doc.getLong("destinationId"),
-                                        destinationName = doc.getString("destinationName") ?: "",
-                                        destinationType = doc.getString("destinationType") ?: "",
-                                        reason = doc.getString("reason") ?: "",
-                                        responsiblePerson = doc.getString("responsiblePerson") ?: "",
-                                        referenceNumber = doc.getString("referenceNumber") ?: "",
-                                        notes = doc.getString("notes") ?: "",
-                                        isReversed = doc.getBoolean("isReversed") ?: false,
-                                        reversedByMovementId = doc.getLong("reversedByMovementId"),
-                                        isDeleted = doc.getBoolean("isDeleted") ?: false
-                                    )
-                                    database.stockMovementDao().insertMovement(entity)
+                                try {
+                                    for (doc in snapshot.documents) {
+                                        val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
+                                        val entity = StockMovementEntity(
+                                            id = id,
+                                            productId = doc.getLong("productId") ?: 0L,
+                                            variantId = doc.getLong("variantId"),
+                                            movementType = doc.getString("movementType") ?: "STOCK_IN",
+                                            quantity = doc.getLong("quantity")?.toInt() ?: 0,
+                                            packageCount = doc.getLong("packageCount")?.toInt() ?: 0,
+                                            dateMillis = doc.getLong("dateMillis") ?: System.currentTimeMillis(),
+                                            dateFormatted = doc.getString("dateFormatted") ?: "",
+                                            source = doc.getString("source") ?: "",
+                                            destinationId = doc.getLong("destinationId"),
+                                            destinationName = doc.getString("destinationName") ?: "",
+                                            destinationType = doc.getString("destinationType") ?: "",
+                                            reason = doc.getString("reason") ?: "",
+                                            responsiblePerson = doc.getString("responsiblePerson") ?: "",
+                                            referenceNumber = doc.getString("referenceNumber") ?: "",
+                                            notes = doc.getString("notes") ?: "",
+                                            isReversed = doc.getBoolean("isReversed") ?: false,
+                                            reversedByMovementId = doc.getLong("reversedByMovementId"),
+                                            isDeleted = doc.getBoolean("isDeleted") ?: false
+                                        )
+                                        database.stockMovementDao().insertMovement(entity)
+                                    }
+                                    _lastSyncTimestamp.value = System.currentTimeMillis()
+                                } catch (e: Exception) {
+                                    Log.e("FirebaseSync", "Error syncing movements from Firestore", e)
                                 }
-                                _lastSyncTimestamp.value = System.currentTimeMillis()
                             }
                         }
                     }
@@ -172,21 +183,25 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                         }
                         if (snapshot != null && !snapshot.isEmpty) {
                             scope.launch {
-                                for (doc in snapshot.documents) {
-                                    val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                                    val entity = DestinationEntity(
-                                        id = id,
-                                        name = doc.getString("name") ?: "",
-                                        type = doc.getString("type") ?: "مسجد",
-                                        commune = doc.getString("commune") ?: "",
-                                        province = doc.getString("province") ?: "",
-                                        address = doc.getString("address") ?: "",
-                                        contactPerson = doc.getString("contactPerson") ?: "",
-                                        phone = doc.getString("phone") ?: ""
-                                    )
-                                    database.destinationDao().insertDestination(entity)
+                                try {
+                                    for (doc in snapshot.documents) {
+                                        val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
+                                        val entity = DestinationEntity(
+                                            id = id,
+                                            name = doc.getString("name") ?: "",
+                                            type = doc.getString("type") ?: "مسجد",
+                                            commune = doc.getString("commune") ?: "",
+                                            province = doc.getString("province") ?: "",
+                                            address = doc.getString("address") ?: "",
+                                            contactPerson = doc.getString("contactPerson") ?: "",
+                                            phone = doc.getString("phone") ?: ""
+                                        )
+                                        database.destinationDao().insertDestination(entity)
+                                    }
+                                    _lastSyncTimestamp.value = System.currentTimeMillis()
+                                } catch (e: Exception) {
+                                    Log.e("FirebaseSync", "Error syncing destinations from Firestore", e)
                                 }
-                                _lastSyncTimestamp.value = System.currentTimeMillis()
                             }
                         }
                     }

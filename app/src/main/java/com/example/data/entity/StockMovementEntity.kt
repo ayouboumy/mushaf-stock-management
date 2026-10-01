@@ -1,20 +1,11 @@
 package com.example.data.entity
 
 import androidx.room.Entity
-import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
 @Entity(
     tableName = "stock_movements",
-    foreignKeys = [
-        ForeignKey(
-            entity = ProductEntity::class,
-            parentColumns = ["id"],
-            childColumns = ["productId"],
-            onDelete = ForeignKey.RESTRICT
-        )
-    ],
     indices = [
         Index(value = ["productId"]),
         Index(value = ["variantId"]),

@@ -23,7 +23,7 @@ import com.example.data.entity.StockMovementEntity
         DestinationEntity::class,
         AuditLogEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

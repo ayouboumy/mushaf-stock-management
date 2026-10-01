@@ -242,6 +242,13 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         refreshNextVoucherNumber()
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                repository.seedDemoDataIfEmpty()
+            } catch (e: Exception) {
+                android.util.Log.e("StockViewModel", "Error seeding demo data", e)
+            }
+        }
     }
 
     // Data streams from repository
