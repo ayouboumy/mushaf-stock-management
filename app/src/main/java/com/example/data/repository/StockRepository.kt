@@ -31,6 +31,12 @@ class StockRepository(private val database: AppDatabase) {
     private val auditLogDao = database.auditLogDao()
     val syncManager = com.example.data.sync.FirebaseSyncManager(database)
 
+    fun generateUniqueId(): Long {
+        val now = System.currentTimeMillis()
+        val rand = (100..999).random()
+        return now * 1000L + rand
+    }
+
     init {
         syncManager.startRealtimeListeners()
     }
@@ -217,7 +223,9 @@ class StockRepository(private val database: AppDatabase) {
         referenceNumber: String,
         notes: String
     ): Long {
+        val uniqueId = generateUniqueId()
         val movement = StockMovementEntity(
+            id = uniqueId,
             productId = productId,
             variantId = variantId,
             movementType = "STOCK_IN",
@@ -230,17 +238,17 @@ class StockRepository(private val database: AppDatabase) {
             referenceNumber = referenceNumber,
             notes = notes
         )
-        val id = movementDao.insertMovement(movement)
-        syncManager.pushMovement(movement.copy(id = id))
+        movementDao.insertMovement(movement)
+        syncManager.pushMovement(movement)
         auditLogDao.insertLog(
             AuditLogEntity(
                 action = "STOCK_IN",
                 entityName = "حركة إدخال",
-                entityId = id,
+                entityId = uniqueId,
                 details = "إدخال كمية: $quantity | المصدر: $source | المرجع: $referenceNumber"
             )
         )
-        return id
+        return uniqueId
     }
 
     // Record Stock Out with validation check
@@ -265,7 +273,9 @@ class StockRepository(private val database: AppDatabase) {
             return Pair(-1L, validation)
         }
 
+        val uniqueId = generateUniqueId()
         val movement = StockMovementEntity(
+            id = uniqueId,
             productId = productId,
             variantId = variantId,
             movementType = "STOCK_OUT",
@@ -280,17 +290,17 @@ class StockRepository(private val database: AppDatabase) {
             referenceNumber = referenceNumber,
             notes = notes
         )
-        val id = movementDao.insertMovement(movement)
-        syncManager.pushMovement(movement.copy(id = id))
+        movementDao.insertMovement(movement)
+        syncManager.pushMovement(movement)
         auditLogDao.insertLog(
             AuditLogEntity(
                 action = "STOCK_OUT",
                 entityName = "حركة إخراج",
-                entityId = id,
+                entityId = uniqueId,
                 details = "توزيع كمية: $quantity | الوجهة: $destinationName | المكلف: $responsiblePerson"
             )
         )
-        return Pair(id, ValidationResult(true))
+        return Pair(uniqueId, ValidationResult(true))
     }
 
     // Record Stock Adjustment
@@ -305,7 +315,9 @@ class StockRepository(private val database: AppDatabase) {
         responsiblePerson: String,
         notes: String
     ): Long {
+        val uniqueId = generateUniqueId()
         val movement = StockMovementEntity(
+            id = uniqueId,
             productId = productId,
             variantId = variantId,
             movementType = "ADJUSTMENT",
@@ -317,17 +329,17 @@ class StockRepository(private val database: AppDatabase) {
             responsiblePerson = responsiblePerson,
             notes = notes
         )
-        val id = movementDao.insertMovement(movement)
-        syncManager.pushMovement(movement.copy(id = id))
+        movementDao.insertMovement(movement)
+        syncManager.pushMovement(movement)
         auditLogDao.insertLog(
             AuditLogEntity(
                 action = "ADJUSTMENT",
                 entityName = "تعديل مخزون",
-                entityId = id,
+                entityId = uniqueId,
                 details = "تعديل بالكمية: $quantity | السبب: $reason | المسؤول: $responsiblePerson"
             )
         )
-        return id
+        return uniqueId
     }
 
     // Reverse a movement (creates an opposite adjustment and marks movement as reversed)
@@ -342,9 +354,11 @@ class StockRepository(private val database: AppDatabase) {
             else -> 0
         }
 
+        val uniqueAdjId = generateUniqueId()
         val now = System.currentTimeMillis()
         val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
         val adjMovement = StockMovementEntity(
+            id = uniqueAdjId,
             productId = movement.productId,
             variantId = movement.variantId,
             movementType = "ADJUSTMENT",
@@ -356,9 +370,9 @@ class StockRepository(private val database: AppDatabase) {
             responsiblePerson = responsiblePerson,
             notes = "عكس الحركة الأصلية رقم #${movement.id}"
         )
-        val newAdjId = movementDao.insertMovement(adjMovement)
-        movementDao.markReversed(movementId, newAdjId, now)
-        syncManager.pushMovement(adjMovement.copy(id = newAdjId))
+        movementDao.insertMovement(adjMovement)
+        movementDao.markReversed(movementId, uniqueAdjId, now)
+        syncManager.pushMovement(adjMovement)
         movementDao.getMovementById(movementId)?.let { syncManager.pushMovement(it) }
 
         auditLogDao.insertLog(
@@ -366,10 +380,10 @@ class StockRepository(private val database: AppDatabase) {
                 action = "REVERSE_MOVEMENT",
                 entityName = "إلغاء حركة",
                 entityId = movementId,
-                details = "إلغاء الحركة #${movement.id} بإنشاء حركة تصحيحية #${newAdjId} بالكمية $reverseQuantity"
+                details = "إلغاء الحركة #${movement.id} بإنشاء حركة تصحيحية #${uniqueAdjId} بالكمية $reverseQuantity"
             )
         )
-        return newAdjId
+        return uniqueAdjId
     }
 
     // Soft delete movement
@@ -457,27 +471,32 @@ class StockRepository(private val database: AppDatabase) {
 
     // Product CRUD
     suspend fun createProduct(product: ProductEntity, variants: List<ProductVariantEntity> = emptyList()): Long {
-        val id = productDao.insertProduct(product)
-        val createdProduct = product.copy(id = id)
+        val uniqueId = if (product.id > 0) product.id else generateUniqueId()
+        val createdProduct = product.copy(id = uniqueId)
+        productDao.insertProduct(createdProduct)
         syncManager.pushProduct(createdProduct)
 
         if (variants.isNotEmpty()) {
-            val variantsWithId = variants.map { it.copy(productId = id) }
-            val variantIds = variantDao.insertAll(variantsWithId)
-            variantsWithId.forEachIndexed { index, v ->
-                val vId = variantIds.getOrNull(index) ?: v.id
-                syncManager.pushVariant(v.copy(id = vId))
+            val variantsWithId = variants.map {
+                it.copy(
+                    id = if (it.id > 0) it.id else generateUniqueId(),
+                    productId = uniqueId
+                )
+            }
+            variantDao.insertAll(variantsWithId)
+            for (v in variantsWithId) {
+                syncManager.pushVariant(v)
             }
         }
         auditLogDao.insertLog(
             AuditLogEntity(
                 action = "CREATE_PRODUCT",
                 entityName = "صنف جديد",
-                entityId = id,
+                entityId = uniqueId,
                 details = "إضافة صنف: ${product.nameArabic} | رصيد أولي: ${product.initialStock}"
             )
         )
-        return id
+        return uniqueId
     }
 
     suspend fun updateProduct(product: ProductEntity) {
@@ -529,17 +548,19 @@ class StockRepository(private val database: AppDatabase) {
 
     // Destination CRUD
     suspend fun addDestination(destination: DestinationEntity): Long {
-        val id = destinationDao.insertDestination(destination)
-        syncManager.pushDestination(destination.copy(id = id))
+        val uniqueId = if (destination.id > 0) destination.id else generateUniqueId()
+        val destWithId = destination.copy(id = uniqueId)
+        destinationDao.insertDestination(destWithId)
+        syncManager.pushDestination(destWithId)
         auditLogDao.insertLog(
             AuditLogEntity(
                 action = "CREATE_DESTINATION",
                 entityName = "وجهة توزيع",
-                entityId = id,
+                entityId = uniqueId,
                 details = "إضافة وجهة جديدة: ${destination.name} (${destination.type})"
             )
         )
-        return id
+        return uniqueId
     }
 
     suspend fun updateDestination(destination: DestinationEntity) {
@@ -563,11 +584,11 @@ class StockRepository(private val database: AppDatabase) {
             }
             return existing
         }
-        val newDest = DestinationEntity(name = name, type = type, address = address)
-        val id = destinationDao.insertDestination(newDest)
-        val withId = newDest.copy(id = id)
-        syncManager.pushDestination(withId)
-        return withId
+        val uniqueId = generateUniqueId()
+        val newDest = DestinationEntity(id = uniqueId, name = name, type = type, address = address)
+        destinationDao.insertDestination(newDest)
+        syncManager.pushDestination(newDest)
+        return newDest
     }
 
     suspend fun getNextVoucherSequenceNumber(): String {
@@ -687,6 +708,7 @@ class StockRepository(private val database: AppDatabase) {
 
         // Create standard Moroccan products from the workbook
         val p1 = ProductEntity(
+            id = 1L,
             nameArabic = "المصحف المحمدي",
             nameFrench = "Le Noble Coran Mohammadéen",
             category = "مصحف شريف",
@@ -700,6 +722,7 @@ class StockRepository(private val database: AppDatabase) {
         val p1Id = productDao.insertProduct(p1)
 
         val p2 = ProductEntity(
+            id = 2L,
             nameArabic = "المصحف المجزأ",
             nameFrench = "Coran Fractionné (Parties)",
             category = "أجزاء",
@@ -713,6 +736,7 @@ class StockRepository(private val database: AppDatabase) {
         val p2Id = productDao.insertProduct(p2)
 
         val p3 = ProductEntity(
+            id = 3L,
             nameArabic = "الهدايا",
             nameFrench = "Édition Cadeau de Luxe",
             category = "خاص",
@@ -726,6 +750,7 @@ class StockRepository(private val database: AppDatabase) {
         val p3Id = productDao.insertProduct(p3)
 
         val p4 = ProductEntity(
+            id = 4L,
             nameArabic = "جزء عم",
             nameFrench = "Juz' Amma",
             category = "أجزاء",
@@ -739,6 +764,7 @@ class StockRepository(private val database: AppDatabase) {
         val p4Id = productDao.insertProduct(p4)
 
         val p5 = ProductEntity(
+            id = 5L,
             nameArabic = "جزء عم - خمسة أحزاب",
             nameFrench = "Cinq Ahzab",
             category = "أجزاء",
@@ -752,6 +778,7 @@ class StockRepository(private val database: AppDatabase) {
         val p5Id = productDao.insertProduct(p5)
 
         val p6 = ProductEntity(
+            id = 6L,
             nameArabic = "ضعاف البصر",
             nameFrench = "Grands Caractères (Malvoyants)",
             category = "خاص",
@@ -765,6 +792,7 @@ class StockRepository(private val database: AppDatabase) {
         val p6Id = productDao.insertProduct(p6)
 
         val p7 = ProductEntity(
+            id = 7L,
             nameArabic = "برايل",
             nameFrench = "Coran en Braille",
             category = "خاص",
@@ -778,6 +806,7 @@ class StockRepository(private val database: AppDatabase) {
         val p7Id = productDao.insertProduct(p7)
 
         val p8 = ProductEntity(
+            id = 8L,
             nameArabic = "المصحف الجيبي",
             nameFrench = "Format Poche",
             category = "مصحف شريف",
@@ -792,6 +821,7 @@ class StockRepository(private val database: AppDatabase) {
 
         // Translated Mushafs with real figures from the Excel workbook
         val p9 = ProductEntity(
+            id = 9L,
             nameArabic = "المصحف المترجم",
             nameFrench = "Traductions du Noble Coran",
             category = "مترجم",
@@ -806,6 +836,7 @@ class StockRepository(private val database: AppDatabase) {
 
         // Variants for translated Mushaf
         val vFr = ProductVariantEntity(
+            id = 101L,
             productId = p9Id,
             nameArabic = "الفرنسية",
             nameFrench = "Français",
@@ -815,6 +846,7 @@ class StockRepository(private val database: AppDatabase) {
             packageQuantity = 10
         )
         val vEn = ProductVariantEntity(
+            id = 102L,
             productId = p9Id,
             nameArabic = "الإنجليزية",
             nameFrench = "English",
@@ -824,6 +856,7 @@ class StockRepository(private val database: AppDatabase) {
             packageQuantity = 10
         )
         val vEs = ProductVariantEntity(
+            id = 103L,
             productId = p9Id,
             nameArabic = "الإسبانية",
             nameFrench = "Español",
@@ -838,16 +871,16 @@ class StockRepository(private val database: AppDatabase) {
 
         // Add typical destinations
         val destList = listOf(
-            DestinationEntity(name = "مسجد السنة - الرباط", type = "مسجد", commune = "حسان", province = "الرباط"),
-            DestinationEntity(name = "مسجد حسان - الرباط", type = "مسجد", commune = "حسان", province = "الرباط"),
-            DestinationEntity(name = "المجلس العلمي المحلي - الصخيرات تمارة", type = "مجلس علمي", commune = "تمارة", province = "الصخيرات تمارة"),
-            DestinationEntity(name = "المجلس العلمي المحلي - سلا", type = "مجلس علمي", commune = "سلا المدينة", province = "سلا"),
-            DestinationEntity(name = "مؤسسة محمد السادس للنهوض بالأعمال الاجتماعية للقيمين الدينيين", type = "مؤسسة", commune = "أكدال", province = "الرباط"),
-            DestinationEntity(name = "جمعية رعاية الكتاتيب القرآنية", type = "جمعية", commune = "سلا الجديدة", province = "سلا"),
-            DestinationEntity(name = "معهد محمد السادس للقراءات والدراسات القرآنية", type = "مؤسسة", commune = "الرباط", province = "الرباط"),
-            DestinationEntity(name = "حفل تكريم حفظة كتاب الله السنوي", type = "حفل", commune = "الرباط", province = "الرباط"),
-            DestinationEntity(name = "بعثة الحجاج المغاربة إلى الديار المقدسة", type = "حاج", commune = "الدار البيضاء", province = "الدار البيضاء"),
-            DestinationEntity(name = "المراكز الإسلامية للمغاربة المقيمين بالخارج", type = "جالية", commune = "باريس / بروكسيل", province = "أوروبا")
+            DestinationEntity(id = 1L, name = "مسجد السنة - الرباط", type = "مسجد", commune = "حسان", province = "الرباط"),
+            DestinationEntity(id = 2L, name = "مسجد حسان - الرباط", type = "مسجد", commune = "حسان", province = "الرباط"),
+            DestinationEntity(id = 3L, name = "المجلس العلمي المحلي - الصخيرات تمارة", type = "مجلس علمي", commune = "تمارة", province = "الصخيرات تمارة"),
+            DestinationEntity(id = 4L, name = "المجلس العلمي المحلي - سلا", type = "مجلس علمي", commune = "سلا المدينة", province = "سلا"),
+            DestinationEntity(id = 5L, name = "مؤسسة محمد السادس للنهوض بالأعمال الاجتماعية للقيمين الدينيين", type = "مؤسسة", commune = "أكدال", province = "الرباط"),
+            DestinationEntity(id = 6L, name = "جمعية رعاية الكتاتيب القرآنية", type = "جمعية", commune = "سلا الجديدة", province = "سلا"),
+            DestinationEntity(id = 7L, name = "معهد محمد السادس للقراءات والدراسات القرآنية", type = "مؤسسة", commune = "الرباط", province = "الرباط"),
+            DestinationEntity(id = 8L, name = "حفل تكريم حفظة كتاب الله السنوي", type = "حفل", commune = "الرباط", province = "الرباط"),
+            DestinationEntity(id = 9L, name = "بعثة الحجاج المغاربة إلى الديار المقدسة", type = "حاج", commune = "الدار البيضاء", province = "الدار البيضاء"),
+            DestinationEntity(id = 10L, name = "المراكز الإسلامية للمغاربة المقيمين بالخارج", type = "جالية", commune = "باريس / بروكسيل", province = "أوروبا")
         )
         val destIds = destinationDao.insertAll(destList)
 
@@ -858,6 +891,7 @@ class StockRepository(private val database: AppDatabase) {
 
         val sampleMovements = listOf(
             StockMovementEntity(
+                id = 1001L,
                 productId = p1Id,
                 movementType = "STOCK_IN",
                 quantity = 1000,
@@ -870,13 +904,14 @@ class StockRepository(private val database: AppDatabase) {
                 notes = "دفعة جديدة من المصحف المحمدي"
             ),
             StockMovementEntity(
+                id = 1002L,
                 productId = p1Id,
                 movementType = "STOCK_OUT",
                 quantity = 350,
                 packageCount = 35,
                 dateMillis = now - 15 * dayMillis,
                 dateFormatted = sdf.format(Date(now - 15 * dayMillis)),
-                destinationId = destIds.getOrNull(0) ?: 1L,
+                destinationId = 1L,
                 destinationName = "مسجد السنة - الرباط",
                 destinationType = "مسجد",
                 responsiblePerson = "أحمد التازي",
@@ -884,13 +919,14 @@ class StockRepository(private val database: AppDatabase) {
                 notes = "تزويد المسجد بالمصاحف بمناسبة حلول شهر رمضان"
             ),
             StockMovementEntity(
+                id = 1003L,
                 productId = p1Id,
                 movementType = "STOCK_OUT",
                 quantity = 150,
                 packageCount = 15,
                 dateMillis = now - 8 * dayMillis,
                 dateFormatted = sdf.format(Date(now - 8 * dayMillis)),
-                destinationId = destIds.getOrNull(2) ?: 3L,
+                destinationId = 3L,
                 destinationName = "المجلس العلمي المحلي - الصخيرات تمارة",
                 destinationType = "مجلس علمي",
                 responsiblePerson = "محمد الفاسي",

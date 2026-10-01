@@ -41,6 +41,9 @@ interface ProductVariantDao {
     @Delete
     suspend fun deleteVariant(variant: ProductVariantEntity)
 
+    @Query("DELETE FROM product_variants WHERE id = :id")
+    suspend fun deleteVariantById(id: Long)
+
     @Query("DELETE FROM product_variants WHERE productId = :productId")
     suspend fun deleteVariantsByProduct(productId: Long)
 

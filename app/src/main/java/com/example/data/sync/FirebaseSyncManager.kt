@@ -8,7 +8,10 @@ import com.example.data.entity.ProductVariantEntity
 import com.example.data.entity.StockMovementEntity
 import com.example.data.model.UserProfile
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.DocumentChange
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreException
+import com.google.firebase.firestore.FirebaseFirestoreSettings
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.CoroutineScope
@@ -20,17 +23,35 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import java.util.concurrent.CopyOnWriteArrayList
 
 class FirebaseSyncManager(private val database: AppDatabase) {
 
-    private val firestore: FirebaseFirestore by lazy { FirebaseFirestore.getInstance() }
+    private val firestore: FirebaseFirestore by lazy {
+        val db = FirebaseFirestore.getInstance()
+        try {
+            val settings = FirebaseFirestoreSettings.Builder()
+                .setPersistenceEnabled(true)
+                .build()
+            db.firestoreSettings = settings
+            Log.d("FirebaseSync", "SYNC: Firestore initialized with offline persistence enabled")
+        } catch (e: Exception) {
+            Log.d("FirebaseSync", "SYNC: Firestore settings note: ${e.message}")
+        }
+        db
+    }
+
     private val auth: FirebaseAuth by lazy { FirebaseAuth.getInstance() }
+
     private val coroutineExceptionHandler = kotlinx.coroutines.CoroutineExceptionHandler { _, throwable ->
-        Log.e("FirebaseSync", "Unhandled sync error caught safely", throwable)
+        Log.e("FirebaseSync", "SYNC: Unhandled sync coroutine error caught safely", throwable)
     }
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + coroutineExceptionHandler)
 
-    private val listeners = mutableListOf<ListenerRegistration>()
+    private val listeners = CopyOnWriteArrayList<ListenerRegistration>()
+
+    @Volatile
+    private var areListenersActive = false
 
     private val _isSyncing = MutableStateFlow(false)
     val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
@@ -42,229 +63,326 @@ class FirebaseSyncManager(private val database: AppDatabase) {
     val syncError: StateFlow<String?> = _syncError.asStateFlow()
 
     @Volatile
-    private var authAttempted = false
-    @Volatile
     private var isAuthDisabled = false
 
-    // Ensure user is signed in to Firebase Auth (anonymous or real)
-    suspend fun ensureAuth(): Boolean {
-        if (isAuthDisabled) return true
-        if (auth.currentUser != null) return true
+    // Ensure user is signed in to Firebase Auth (anonymous or real credential)
+    suspend fun ensureAuth(): Boolean = withContext(Dispatchers.IO) {
+        if (isAuthDisabled) return@withContext true
+        val current = auth.currentUser
+        if (current != null) {
+            Log.d("FirebaseSync", "SYNC: Authenticated user = ${current.uid}, email = ${current.email ?: "none"}")
+            return@withContext true
+        }
 
-        return try {
+        try {
             auth.signInAnonymously().await()
-            Log.d("FirebaseSync", "Firebase anonymous auth successful: ${auth.currentUser?.uid}")
+            Log.d("FirebaseSync", "SYNC: Firebase anonymous auth successful: UID = ${auth.currentUser?.uid}")
             true
         } catch (e: Exception) {
             val msg = e.localizedMessage ?: ""
             if (msg.contains("CONFIGURATION_NOT_FOUND", ignoreCase = true) ||
                 msg.contains("ADMIN_ONLY_OPERATION", ignoreCase = true)
             ) {
-                Log.w("FirebaseSync", "Firebase Auth not enabled in console, using direct Firestore sync: $msg")
+                Log.w("FirebaseSync", "SYNC: Anonymous Auth not enabled in console, using direct Firestore sync: $msg")
                 isAuthDisabled = true
             } else {
-                Log.w("FirebaseSync", "Firebase Auth warning: $msg")
+                Log.w("FirebaseSync", "SYNC: Firebase Auth warning: $msg")
             }
             true
         }
     }
 
     // Register or sign in user with email & password in Firebase Auth + Firestore
-    suspend fun registerOrAuthUser(profile: UserProfile, password: String = ""): Boolean {
-        return withContext(Dispatchers.IO) {
-            try {
-                if (profile.email.isNotBlank() && password.length >= 6) {
+    suspend fun registerOrAuthUser(profile: UserProfile, password: String = ""): Boolean = withContext(Dispatchers.IO) {
+        try {
+            if (profile.email.isNotBlank() && password.length >= 6) {
+                try {
+                    auth.createUserWithEmailAndPassword(profile.email.trim(), password).await()
+                    Log.d("FirebaseSync", "SYNC: User registered in Firebase Auth: ${auth.currentUser?.uid}")
+                } catch (e: Exception) {
                     try {
-                        auth.createUserWithEmailAndPassword(profile.email.trim(), password).await()
-                        Log.d("FirebaseSync", "User registered in Firebase Auth: ${auth.currentUser?.uid}")
-                    } catch (e: Exception) {
-                        // User might already exist, try sign in
-                        try {
-                            auth.signInWithEmailAndPassword(profile.email.trim(), password).await()
-                            Log.d("FirebaseSync", "User signed in to Firebase Auth: ${auth.currentUser?.uid}")
-                        } catch (e2: Exception) {
-                            Log.w("FirebaseSync", "Auth fallback to anonymous: ${e2.localizedMessage}")
-                            ensureAuth()
-                        }
+                        auth.signInWithEmailAndPassword(profile.email.trim(), password).await()
+                        Log.d("FirebaseSync", "SYNC: User signed in to Firebase Auth: ${auth.currentUser?.uid}")
+                    } catch (e2: Exception) {
+                        Log.w("FirebaseSync", "SYNC: Auth fallback: ${e2.localizedMessage}")
+                        ensureAuth()
                     }
-                } else {
-                    ensureAuth()
                 }
-
-                syncUserProfile(profile)
-                true
-            } catch (e: Exception) {
-                Log.e("FirebaseSync", "registerOrAuthUser error", e)
-                true // proceed gracefully so local usage is not blocked
+            } else {
+                ensureAuth()
             }
+
+            syncUserProfile(profile)
+            true
+        } catch (e: Exception) {
+            Log.e("FirebaseSync", "SYNC: registerOrAuthUser error", e)
+            true
         }
     }
 
-    // Start Realtime Firestore Listeners to receive changes from other devices instantly
+    // Start Realtime Firestore Listeners - thread-safe, keeps listeners alive continuously
+    @Synchronized
     fun startRealtimeListeners() {
-        scope.launch {
-            try {
-                ensureAuth()
-                stopListeners()
+        if (areListenersActive) {
+            Log.d("FirebaseSync", "SYNC: Realtime listeners are already active. Skipping redundant start.")
+            return
+        }
+        areListenersActive = true
+        Log.d("FirebaseSync", "SYNC: Starting real-time Firestore listeners for all collections")
 
-                // 1. Listen to Products
+        scope.launch {
+            ensureAuth()
+
+            // 1. Listen to Products Collection
+            try {
+                Log.d("FirebaseSync", "SYNC: Attaching products snapshot listener")
                 val prodListener = firestore.collection("products")
                     .addSnapshotListener { snapshot, error ->
                         if (error != null) {
-                            Log.e("FirebaseSync", "Products listen error: ${error.message}")
+                            handleListenerError("products", error)
                             return@addSnapshotListener
                         }
-                        if (snapshot != null && !snapshot.isEmpty) {
-                            scope.launch {
-                                try {
-                                    for (doc in snapshot.documents) {
-                                        val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                                        val entity = ProductEntity(
-                                            id = id,
-                                            nameArabic = doc.getString("nameArabic") ?: "",
-                                            nameFrench = doc.getString("nameFrench") ?: "",
-                                            category = doc.getString("category") ?: "",
-                                            formatType = doc.getString("formatType") ?: "",
-                                            unit = doc.getString("unit") ?: "نسخة",
-                                            packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 1,
-                                            minimumStock = doc.getLong("minimumStock")?.toInt() ?: 0,
-                                            initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
-                                            notes = doc.getString("notes") ?: "",
-                                            active = doc.getBoolean("active") ?: true
-                                        )
-                                        database.productDao().insertProduct(entity)
+                        if (snapshot == null) return@addSnapshotListener
+
+                        val isFromCache = snapshot.metadata.isFromCache
+                        Log.d("FirebaseSync", "SYNC: Products snapshot received. count=${snapshot.size()}, fromCache=$isFromCache")
+
+                        scope.launch {
+                            try {
+                                for (change in snapshot.documentChanges) {
+                                    val doc = change.document
+                                    val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
+
+                                    when (change.type) {
+                                        DocumentChange.Type.ADDED, DocumentChange.Type.MODIFIED -> {
+                                            val entity = ProductEntity(
+                                                id = id,
+                                                nameArabic = doc.getString("nameArabic") ?: "",
+                                                nameFrench = doc.getString("nameFrench") ?: "",
+                                                category = doc.getString("category") ?: "مصحف شريف",
+                                                language = doc.getString("language") ?: "العربية",
+                                                formatType = doc.getString("formatType") ?: "عادي",
+                                                unit = doc.getString("unit") ?: "نسخة",
+                                                packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 10,
+                                                minimumStock = doc.getLong("minimumStock")?.toInt() ?: 50,
+                                                initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
+                                                notes = doc.getString("notes") ?: "",
+                                                active = doc.getBoolean("active") ?: true,
+                                                updatedAt = doc.getLong("updatedAt") ?: System.currentTimeMillis()
+                                            )
+                                            database.productDao().insertProduct(entity)
+                                            Log.d("FirebaseSync", "SYNC: Product ${change.type} id=$id name=${entity.nameArabic} initialStock=${entity.initialStock}")
+                                        }
+                                        DocumentChange.Type.REMOVED -> {
+                                            database.productDao().deleteProductById(id)
+                                            Log.d("FirebaseSync", "SYNC: Product REMOVED id=$id from Room")
+                                        }
                                     }
-                                    _lastSyncTimestamp.value = System.currentTimeMillis()
-                                } catch (e: Exception) {
-                                    Log.e("FirebaseSync", "Error syncing products from Firestore", e)
                                 }
+                                _lastSyncTimestamp.value = System.currentTimeMillis()
+                            } catch (e: Exception) {
+                                Log.e("FirebaseSync", "SYNC: Error updating products in Room", e)
                             }
                         }
                     }
                 listeners.add(prodListener)
+            } catch (e: Exception) {
+                Log.e("FirebaseSync", "SYNC: Failed to attach products listener", e)
+            }
 
-                // 2. Listen to Product Variants
+            // 2. Listen to Product Variants Collection
+            try {
+                Log.d("FirebaseSync", "SYNC: Attaching variants snapshot listener")
                 val variantListener = firestore.collection("variants")
                     .addSnapshotListener { snapshot, error ->
                         if (error != null) {
-                            Log.e("FirebaseSync", "Variants listen error: ${error.message}")
+                            handleListenerError("variants", error)
                             return@addSnapshotListener
                         }
-                        if (snapshot != null && !snapshot.isEmpty) {
-                            scope.launch {
-                                try {
-                                    for (doc in snapshot.documents) {
-                                        val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                                        val entity = ProductVariantEntity(
-                                            id = id,
-                                            productId = doc.getLong("productId") ?: 0L,
-                                            nameArabic = doc.getString("nameArabic") ?: "",
-                                            nameFrench = doc.getString("nameFrench") ?: "",
-                                            code = doc.getString("code") ?: "",
-                                            initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
-                                            minimumStock = doc.getLong("minimumStock")?.toInt() ?: 20,
-                                            packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 10,
-                                            notes = doc.getString("notes") ?: "",
-                                            active = doc.getBoolean("active") ?: true
-                                        )
-                                        database.productVariantDao().insertVariant(entity)
+                        if (snapshot == null) return@addSnapshotListener
+
+                        val isFromCache = snapshot.metadata.isFromCache
+                        Log.d("FirebaseSync", "SYNC: Variants snapshot received. count=${snapshot.size()}, fromCache=$isFromCache")
+
+                        scope.launch {
+                            try {
+                                for (change in snapshot.documentChanges) {
+                                    val doc = change.document
+                                    val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
+
+                                    when (change.type) {
+                                        DocumentChange.Type.ADDED, DocumentChange.Type.MODIFIED -> {
+                                            val entity = ProductVariantEntity(
+                                                id = id,
+                                                productId = doc.getLong("productId") ?: 0L,
+                                                nameArabic = doc.getString("nameArabic") ?: "",
+                                                nameFrench = doc.getString("nameFrench") ?: "",
+                                                code = doc.getString("code") ?: "",
+                                                initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
+                                                minimumStock = doc.getLong("minimumStock")?.toInt() ?: 20,
+                                                packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 10,
+                                                notes = doc.getString("notes") ?: "",
+                                                active = doc.getBoolean("active") ?: true
+                                            )
+                                            database.productVariantDao().insertVariant(entity)
+                                            Log.d("FirebaseSync", "SYNC: Variant ${change.type} id=$id name=${entity.nameArabic}")
+                                        }
+                                        DocumentChange.Type.REMOVED -> {
+                                            database.productVariantDao().deleteVariantById(id)
+                                            Log.d("FirebaseSync", "SYNC: Variant REMOVED id=$id from Room")
+                                        }
                                     }
-                                    _lastSyncTimestamp.value = System.currentTimeMillis()
-                                } catch (e: Exception) {
-                                    Log.e("FirebaseSync", "Error syncing variants from Firestore", e)
                                 }
+                                _lastSyncTimestamp.value = System.currentTimeMillis()
+                            } catch (e: Exception) {
+                                Log.e("FirebaseSync", "SYNC: Error updating variants in Room", e)
                             }
                         }
                     }
                 listeners.add(variantListener)
+            } catch (e: Exception) {
+                Log.e("FirebaseSync", "SYNC: Failed to attach variants listener", e)
+            }
 
-                // 3. Listen to Stock Movements
+            // 3. Listen to Stock Movements Collection (SOURCE OF TRUTH FOR REAL-TIME INVENTORY)
+            try {
+                Log.d("FirebaseSync", "SYNC: Attaching movements snapshot listener")
                 val moveListener = firestore.collection("movements")
                     .addSnapshotListener { snapshot, error ->
                         if (error != null) {
-                            Log.e("FirebaseSync", "Movements listen error: ${error.message}")
+                            handleListenerError("movements", error)
                             return@addSnapshotListener
                         }
-                        if (snapshot != null && !snapshot.isEmpty) {
-                            scope.launch {
-                                try {
-                                    for (doc in snapshot.documents) {
-                                        val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                                        val entity = StockMovementEntity(
-                                            id = id,
-                                            productId = doc.getLong("productId") ?: 0L,
-                                            variantId = doc.getLong("variantId"),
-                                            movementType = doc.getString("movementType") ?: "STOCK_IN",
-                                            quantity = doc.getLong("quantity")?.toInt() ?: 0,
-                                            packageCount = doc.getLong("packageCount")?.toInt() ?: 0,
-                                            dateMillis = doc.getLong("dateMillis") ?: System.currentTimeMillis(),
-                                            dateFormatted = doc.getString("dateFormatted") ?: "",
-                                            source = doc.getString("source") ?: "",
-                                            destinationId = doc.getLong("destinationId"),
-                                            destinationName = doc.getString("destinationName") ?: "",
-                                            destinationType = doc.getString("destinationType") ?: "",
-                                            reason = doc.getString("reason") ?: "",
-                                            responsiblePerson = doc.getString("responsiblePerson") ?: "",
-                                            referenceNumber = doc.getString("referenceNumber") ?: "",
-                                            notes = doc.getString("notes") ?: "",
-                                            isReversed = doc.getBoolean("isReversed") ?: false,
-                                            reversedByMovementId = doc.getLong("reversedByMovementId"),
-                                            isDeleted = doc.getBoolean("isDeleted") ?: false
-                                        )
-                                        database.stockMovementDao().insertMovement(entity)
+                        if (snapshot == null) return@addSnapshotListener
+
+                        val isFromCache = snapshot.metadata.isFromCache
+                        Log.d("FirebaseSync", "SYNC: Movements snapshot received. count=${snapshot.size()}, fromCache=$isFromCache")
+
+                        scope.launch {
+                            try {
+                                for (change in snapshot.documentChanges) {
+                                    val doc = change.document
+                                    val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
+
+                                    when (change.type) {
+                                        DocumentChange.Type.ADDED, DocumentChange.Type.MODIFIED -> {
+                                            val entity = StockMovementEntity(
+                                                id = id,
+                                                productId = doc.getLong("productId") ?: 0L,
+                                                variantId = doc.getLong("variantId"),
+                                                movementType = doc.getString("movementType") ?: "STOCK_IN",
+                                                quantity = doc.getLong("quantity")?.toInt() ?: 0,
+                                                packageCount = doc.getLong("packageCount")?.toInt() ?: 0,
+                                                dateMillis = doc.getLong("dateMillis") ?: System.currentTimeMillis(),
+                                                dateFormatted = doc.getString("dateFormatted") ?: "",
+                                                source = doc.getString("source") ?: "",
+                                                destinationId = doc.getLong("destinationId"),
+                                                destinationName = doc.getString("destinationName") ?: "",
+                                                destinationType = doc.getString("destinationType") ?: "",
+                                                reason = doc.getString("reason") ?: "",
+                                                responsiblePerson = doc.getString("responsiblePerson") ?: "",
+                                                referenceNumber = doc.getString("referenceNumber") ?: "",
+                                                notes = doc.getString("notes") ?: "",
+                                                isReversed = doc.getBoolean("isReversed") ?: false,
+                                                reversedByMovementId = doc.getLong("reversedByMovementId"),
+                                                isDeleted = doc.getBoolean("isDeleted") ?: false,
+                                                updatedAt = doc.getLong("updatedAt") ?: System.currentTimeMillis()
+                                            )
+                                            database.stockMovementDao().insertMovement(entity)
+                                            Log.d("FirebaseSync", "SYNC: Movement ${change.type} id=$id type=${entity.movementType} qty=${entity.quantity} prodId=${entity.productId}")
+                                        }
+                                        DocumentChange.Type.REMOVED -> {
+                                            database.stockMovementDao().deleteMovementById(id)
+                                            Log.d("FirebaseSync", "SYNC: Movement REMOVED id=$id from Room")
+                                        }
                                     }
-                                    _lastSyncTimestamp.value = System.currentTimeMillis()
-                                } catch (e: Exception) {
-                                    Log.e("FirebaseSync", "Error syncing movements from Firestore", e)
                                 }
+                                _lastSyncTimestamp.value = System.currentTimeMillis()
+                            } catch (e: Exception) {
+                                Log.e("FirebaseSync", "SYNC: Error updating movements in Room", e)
                             }
                         }
                     }
                 listeners.add(moveListener)
+            } catch (e: Exception) {
+                Log.e("FirebaseSync", "SYNC: Failed to attach movements listener", e)
+            }
 
-                // 4. Listen to Destinations
+            // 4. Listen to Destinations Collection
+            try {
+                Log.d("FirebaseSync", "SYNC: Attaching destinations snapshot listener")
                 val destListener = firestore.collection("destinations")
                     .addSnapshotListener { snapshot, error ->
                         if (error != null) {
-                            Log.e("FirebaseSync", "Destinations listen error: ${error.message}")
+                            handleListenerError("destinations", error)
                             return@addSnapshotListener
                         }
-                        if (snapshot != null && !snapshot.isEmpty) {
-                            scope.launch {
-                                try {
-                                    for (doc in snapshot.documents) {
-                                        val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                                        val entity = DestinationEntity(
-                                            id = id,
-                                            name = doc.getString("name") ?: "",
-                                            type = doc.getString("type") ?: "مسجد",
-                                            commune = doc.getString("commune") ?: "",
-                                            province = doc.getString("province") ?: "",
-                                            address = doc.getString("address") ?: "",
-                                            contactPerson = doc.getString("contactPerson") ?: "",
-                                            phone = doc.getString("phone") ?: ""
-                                        )
-                                        database.destinationDao().insertDestination(entity)
+                        if (snapshot == null) return@addSnapshotListener
+
+                        val isFromCache = snapshot.metadata.isFromCache
+                        Log.d("FirebaseSync", "SYNC: Destinations snapshot received. count=${snapshot.size()}, fromCache=$isFromCache")
+
+                        scope.launch {
+                            try {
+                                for (change in snapshot.documentChanges) {
+                                    val doc = change.document
+                                    val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
+
+                                    when (change.type) {
+                                        DocumentChange.Type.ADDED, DocumentChange.Type.MODIFIED -> {
+                                            val entity = DestinationEntity(
+                                                id = id,
+                                                name = doc.getString("name") ?: "",
+                                                type = doc.getString("type") ?: "مسجد",
+                                                commune = doc.getString("commune") ?: "",
+                                                province = doc.getString("province") ?: "",
+                                                address = doc.getString("address") ?: "",
+                                                contactPerson = doc.getString("contactPerson") ?: "",
+                                                phone = doc.getString("phone") ?: ""
+                                            )
+                                            database.destinationDao().insertDestination(entity)
+                                            Log.d("FirebaseSync", "SYNC: Destination ${change.type} id=$id name=${entity.name}")
+                                        }
+                                        DocumentChange.Type.REMOVED -> {
+                                            database.destinationDao().deleteDestinationById(id)
+                                            Log.d("FirebaseSync", "SYNC: Destination REMOVED id=$id from Room")
+                                        }
                                     }
-                                    _lastSyncTimestamp.value = System.currentTimeMillis()
-                                } catch (e: Exception) {
-                                    Log.e("FirebaseSync", "Error syncing destinations from Firestore", e)
                                 }
+                                _lastSyncTimestamp.value = System.currentTimeMillis()
+                            } catch (e: Exception) {
+                                Log.e("FirebaseSync", "SYNC: Error updating destinations in Room", e)
                             }
                         }
                     }
                 listeners.add(destListener)
             } catch (e: Exception) {
-                Log.e("FirebaseSync", "Failed to start Firebase listeners", e)
+                Log.e("FirebaseSync", "SYNC: Failed to attach destinations listener", e)
             }
         }
     }
 
+    private fun handleListenerError(collection: String, error: FirebaseFirestoreException) {
+        val msg = "SYNC: Listener ERROR on [$collection] code=${error.code}: ${error.message}"
+        Log.e("FirebaseSync", msg)
+        _syncError.value = "خطأ في مزامنة $collection: ${error.code}"
+        if (error.code == FirebaseFirestoreException.Code.PERMISSION_DENIED) {
+            Log.e("FirebaseSync", "SYNC: PERMISSION_DENIED! Ensure Firestore security rules allow read/write for authenticated users.")
+        }
+    }
+
+    @Synchronized
     fun stopListeners() {
         for (l in listeners) {
-            l.remove()
+            try {
+                l.remove()
+            } catch (e: Exception) {
+                Log.e("FirebaseSync", "SYNC: Error removing listener", e)
+            }
         }
         listeners.clear()
+        areListenersActive = false
+        Log.d("FirebaseSync", "SYNC: Stopped all realtime listeners")
     }
 
     // Pull ALL collections from Firestore into local Room database
@@ -274,10 +392,12 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         _syncError.value = null
         try {
             ensureAuth()
+            Log.d("FirebaseSync", "SYNC: Initiating full pull from Cloud Firestore")
 
             // 1. Pull Products
             val prodDocs = firestore.collection("products").get().await()
             val hasRemoteProducts = !prodDocs.isEmpty
+            Log.d("FirebaseSync", "SYNC: Pulled ${prodDocs.size()} products from cloud")
             if (hasRemoteProducts) {
                 for (doc in prodDocs.documents) {
                     val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
@@ -285,14 +405,16 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                         id = id,
                         nameArabic = doc.getString("nameArabic") ?: "",
                         nameFrench = doc.getString("nameFrench") ?: "",
-                        category = doc.getString("category") ?: "",
-                        formatType = doc.getString("formatType") ?: "",
+                        category = doc.getString("category") ?: "مصحف شريف",
+                        language = doc.getString("language") ?: "العربية",
+                        formatType = doc.getString("formatType") ?: "عادي",
                         unit = doc.getString("unit") ?: "نسخة",
-                        packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 1,
-                        minimumStock = doc.getLong("minimumStock")?.toInt() ?: 0,
+                        packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 10,
+                        minimumStock = doc.getLong("minimumStock")?.toInt() ?: 50,
                         initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
                         notes = doc.getString("notes") ?: "",
-                        active = doc.getBoolean("active") ?: true
+                        active = doc.getBoolean("active") ?: true,
+                        updatedAt = doc.getLong("updatedAt") ?: System.currentTimeMillis()
                     )
                     database.productDao().insertProduct(entity)
                 }
@@ -300,6 +422,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
 
             // 2. Pull Variants
             val varDocs = firestore.collection("variants").get().await()
+            Log.d("FirebaseSync", "SYNC: Pulled ${varDocs.size()} variants from cloud")
             for (doc in varDocs.documents) {
                 val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
                 val entity = ProductVariantEntity(
@@ -319,6 +442,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
 
             // 3. Pull Movements
             val moveDocs = firestore.collection("movements").get().await()
+            Log.d("FirebaseSync", "SYNC: Pulled ${moveDocs.size()} movements from cloud")
             for (doc in moveDocs.documents) {
                 val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
                 val entity = StockMovementEntity(
@@ -340,13 +464,15 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                     notes = doc.getString("notes") ?: "",
                     isReversed = doc.getBoolean("isReversed") ?: false,
                     reversedByMovementId = doc.getLong("reversedByMovementId"),
-                    isDeleted = doc.getBoolean("isDeleted") ?: false
+                    isDeleted = doc.getBoolean("isDeleted") ?: false,
+                    updatedAt = doc.getLong("updatedAt") ?: System.currentTimeMillis()
                 )
                 database.stockMovementDao().insertMovement(entity)
             }
 
             // 4. Pull Destinations
             val destDocs = firestore.collection("destinations").get().await()
+            Log.d("FirebaseSync", "SYNC: Pulled ${destDocs.size()} destinations from cloud")
             for (doc in destDocs.documents) {
                 val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
                 val entity = DestinationEntity(
@@ -366,15 +492,17 @@ class FirebaseSyncManager(private val database: AppDatabase) {
             hasRemoteProducts
         } catch (e: Exception) {
             _syncError.value = e.localizedMessage
-            Log.e("FirebaseSync", "pullAllFromCloud error", e)
+            Log.e("FirebaseSync", "SYNC: pullAllFromCloud error", e)
             false
         } finally {
             _isSyncing.value = false
         }
     }
 
-    // Push local data to Firestore
-    suspend fun pushProduct(product: ProductEntity) = withContext(Dispatchers.IO) {
+    // Push product to Firestore with detailed status logging
+    suspend fun pushProduct(product: ProductEntity): Boolean = withContext(Dispatchers.IO) {
+        val docId = product.id.toString()
+        Log.d("FirebaseSync", "SYNC: Product write started id=$docId name=${product.nameArabic}")
         try {
             ensureAuth()
             val data = hashMapOf(
@@ -382,6 +510,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 "nameArabic" to product.nameArabic,
                 "nameFrench" to product.nameFrench,
                 "category" to product.category,
+                "language" to product.language,
                 "formatType" to product.formatType,
                 "unit" to product.unit,
                 "packageQuantity" to product.packageQuantity,
@@ -391,22 +520,33 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 "active" to product.active,
                 "updatedAt" to System.currentTimeMillis()
             )
-            firestore.collection("products").document(product.id.toString()).set(data, SetOptions.merge()).await()
+            firestore.collection("products").document(docId).set(data, SetOptions.merge()).await()
+            Log.d("FirebaseSync", "SYNC: Product write SUCCESS id=$docId")
+            true
         } catch (e: Exception) {
-            Log.e("FirebaseSync", "Push product failed", e)
+            Log.e("FirebaseSync", "SYNC: Product write FAILED id=$docId: ${e.message}")
+            _syncError.value = "فشل مزامنة الصنف: ${e.localizedMessage}"
+            false
         }
     }
 
-    suspend fun deleteProduct(productId: Long) = withContext(Dispatchers.IO) {
+    suspend fun deleteProduct(productId: Long): Boolean = withContext(Dispatchers.IO) {
+        val docId = productId.toString()
+        Log.d("FirebaseSync", "SYNC: Product delete started id=$docId")
         try {
             ensureAuth()
-            firestore.collection("products").document(productId.toString()).update("active", false, "updatedAt", System.currentTimeMillis()).await()
+            firestore.collection("products").document(docId).update("active", false, "updatedAt", System.currentTimeMillis()).await()
+            Log.d("FirebaseSync", "SYNC: Product delete SUCCESS id=$docId")
+            true
         } catch (e: Exception) {
-            Log.e("FirebaseSync", "Delete product in Firestore failed", e)
+            Log.e("FirebaseSync", "SYNC: Product delete FAILED id=$docId: ${e.message}")
+            false
         }
     }
 
-    suspend fun pushVariant(variant: ProductVariantEntity) = withContext(Dispatchers.IO) {
+    suspend fun pushVariant(variant: ProductVariantEntity): Boolean = withContext(Dispatchers.IO) {
+        val docId = variant.id.toString()
+        Log.d("FirebaseSync", "SYNC: Variant write started id=$docId")
         try {
             ensureAuth()
             val data = hashMapOf(
@@ -422,22 +562,32 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 "active" to variant.active,
                 "updatedAt" to System.currentTimeMillis()
             )
-            firestore.collection("variants").document(variant.id.toString()).set(data, SetOptions.merge()).await()
+            firestore.collection("variants").document(docId).set(data, SetOptions.merge()).await()
+            Log.d("FirebaseSync", "SYNC: Variant write SUCCESS id=$docId")
+            true
         } catch (e: Exception) {
-            Log.e("FirebaseSync", "Push variant failed", e)
+            Log.e("FirebaseSync", "SYNC: Variant write FAILED id=$docId: ${e.message}")
+            false
         }
     }
 
-    suspend fun deleteVariant(variantId: Long) = withContext(Dispatchers.IO) {
+    suspend fun deleteVariant(variantId: Long): Boolean = withContext(Dispatchers.IO) {
+        val docId = variantId.toString()
         try {
             ensureAuth()
-            firestore.collection("variants").document(variantId.toString()).update("active", false, "updatedAt", System.currentTimeMillis()).await()
+            firestore.collection("variants").document(docId).update("active", false, "updatedAt", System.currentTimeMillis()).await()
+            Log.d("FirebaseSync", "SYNC: Variant delete SUCCESS id=$docId")
+            true
         } catch (e: Exception) {
-            Log.e("FirebaseSync", "Delete variant in Firestore failed", e)
+            Log.e("FirebaseSync", "SYNC: Variant delete FAILED id=$docId: ${e.message}")
+            false
         }
     }
 
-    suspend fun pushMovement(movement: StockMovementEntity) = withContext(Dispatchers.IO) {
+    // Push movement to Firestore (CRITICAL SOURCE OF TRUTH FOR REAL-TIME INVENTORY)
+    suspend fun pushMovement(movement: StockMovementEntity): Boolean = withContext(Dispatchers.IO) {
+        val docId = movement.id.toString()
+        Log.d("FirebaseSync", "SYNC: Movement write started id=$docId type=${movement.movementType} qty=${movement.quantity} prodId=${movement.productId}")
         try {
             ensureAuth()
             val data = hashMapOf(
@@ -462,13 +612,19 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 "isDeleted" to movement.isDeleted,
                 "updatedAt" to System.currentTimeMillis()
             )
-            firestore.collection("movements").document(movement.id.toString()).set(data, SetOptions.merge()).await()
+            firestore.collection("movements").document(docId).set(data, SetOptions.merge()).await()
+            Log.d("FirebaseSync", "SYNC: Movement write SUCCESS id=$docId")
+            true
         } catch (e: Exception) {
-            Log.e("FirebaseSync", "Push movement failed", e)
+            Log.e("FirebaseSync", "SYNC: Movement write FAILED id=$docId: ${e.message}")
+            _syncError.value = "فشل مزامنة الحركة: ${e.localizedMessage}"
+            false
         }
     }
 
-    suspend fun pushDestination(destination: DestinationEntity) = withContext(Dispatchers.IO) {
+    suspend fun pushDestination(destination: DestinationEntity): Boolean = withContext(Dispatchers.IO) {
+        val docId = destination.id.toString()
+        Log.d("FirebaseSync", "SYNC: Destination write started id=$docId name=${destination.name}")
         try {
             ensureAuth()
             val data = hashMapOf(
@@ -482,22 +638,30 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 "phone" to destination.phone,
                 "updatedAt" to System.currentTimeMillis()
             )
-            firestore.collection("destinations").document(destination.id.toString()).set(data, SetOptions.merge()).await()
+            firestore.collection("destinations").document(docId).set(data, SetOptions.merge()).await()
+            Log.d("FirebaseSync", "SYNC: Destination write SUCCESS id=$docId")
+            true
         } catch (e: Exception) {
-            Log.e("FirebaseSync", "Push destination failed", e)
+            Log.e("FirebaseSync", "SYNC: Destination write FAILED id=$docId: ${e.message}")
+            false
         }
     }
 
-    suspend fun deleteDestination(destinationId: Long) = withContext(Dispatchers.IO) {
+    suspend fun deleteDestination(destinationId: Long): Boolean = withContext(Dispatchers.IO) {
+        val docId = destinationId.toString()
+        Log.d("FirebaseSync", "SYNC: Destination delete started id=$docId")
         try {
             ensureAuth()
-            firestore.collection("destinations").document(destinationId.toString()).delete().await()
+            firestore.collection("destinations").document(docId).delete().await()
+            Log.d("FirebaseSync", "SYNC: Destination delete SUCCESS id=$docId")
+            true
         } catch (e: Exception) {
-            Log.e("FirebaseSync", "Delete destination in Firestore failed", e)
+            Log.e("FirebaseSync", "SYNC: Destination delete FAILED id=$docId: ${e.message}")
+            false
         }
     }
 
-    suspend fun syncUserProfile(profile: UserProfile) = withContext(Dispatchers.IO) {
+    suspend fun syncUserProfile(profile: UserProfile): Boolean = withContext(Dispatchers.IO) {
         try {
             ensureAuth()
             val docId = if (profile.id.isNotBlank()) profile.id else (auth.currentUser?.uid ?: "user_default")
@@ -510,14 +674,18 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 "lastActive" to System.currentTimeMillis()
             )
             firestore.collection("users").document(docId).set(data, SetOptions.merge()).await()
+            Log.d("FirebaseSync", "SYNC: User profile synced for $docId")
+            true
         } catch (e: Exception) {
-            Log.e("FirebaseSync", "Sync user profile failed", e)
+            Log.e("FirebaseSync", "SYNC: Sync user profile failed", e)
+            false
         }
     }
 
-    suspend fun pushAllToCloud() = withContext(Dispatchers.IO) {
+    suspend fun pushAllToCloud(): Boolean = withContext(Dispatchers.IO) {
         try {
             ensureAuth()
+            Log.d("FirebaseSync", "SYNC: Pushing all local records to Cloud Firestore")
             val products = database.productDao().getActiveProductsList()
             for (p in products) {
                 pushProduct(p)
@@ -534,8 +702,11 @@ class FirebaseSyncManager(private val database: AppDatabase) {
             for (d in destinations) {
                 pushDestination(d)
             }
+            Log.d("FirebaseSync", "SYNC: pushAllToCloud completed successfully")
+            true
         } catch (e: Exception) {
-            Log.e("FirebaseSync", "pushAllToCloud error", e)
+            Log.e("FirebaseSync", "SYNC: pushAllToCloud error", e)
+            false
         }
     }
 
@@ -544,15 +715,17 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         _syncError.value = null
         try {
             ensureAuth()
+            Log.d("FirebaseSync", "SYNC: Starting full bidirectional sync")
             // 1. Pull latest changes from Firestore
             pullAllFromCloud()
             // 2. Push any local changes to Firestore
             pushAllToCloud()
             _lastSyncTimestamp.value = System.currentTimeMillis()
+            Log.d("FirebaseSync", "SYNC: Full bidirectional sync completed successfully")
             true
         } catch (e: Exception) {
             _syncError.value = e.localizedMessage
-            Log.e("FirebaseSync", "fullBidirectionalSync error", e)
+            Log.e("FirebaseSync", "SYNC: fullBidirectionalSync error", e)
             false
         } finally {
             _isSyncing.value = false

@@ -47,6 +47,9 @@ interface StockMovementDao {
     @Delete
     suspend fun deleteMovement(movement: StockMovementEntity)
 
+    @Query("DELETE FROM stock_movements WHERE id = :id")
+    suspend fun deleteMovementById(id: Long)
+
     @Query("UPDATE stock_movements SET isDeleted = 1, updatedAt = :timestamp WHERE id = :id")
     suspend fun softDeleteMovement(id: Long, timestamp: Long = System.currentTimeMillis())
 
