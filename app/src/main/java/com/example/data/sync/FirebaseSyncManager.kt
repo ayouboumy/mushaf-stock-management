@@ -37,26 +37,50 @@ class FirebaseSyncManager(private val database: AppDatabase) {
     private val _syncError = MutableStateFlow<String?>(null)
     val syncError: StateFlow<String?> = _syncError.asStateFlow()
 
-    // Sign in anonymously or with credentials to Firebase Auth if needed
+    @Volatile
+    private var authAttempted = false
+    @Volatile
+    private var isAuthDisabled = false
+
+    // Sign in anonymously or with credentials to Firebase Auth if enabled/needed
     fun ensureAuth(onComplete: (Boolean) -> Unit = {}) {
+        if (isAuthDisabled) {
+            onComplete(true)
+            return
+        }
+
         try {
-            if (auth.currentUser == null) {
-                auth.signInAnonymously()
-                    .addOnCompleteListener { task ->
-                        if (task.isSuccessful) {
-                            Log.d("FirebaseSync", "Firebase Auth successful: ${auth.currentUser?.uid}")
-                            onComplete(true)
+            if (auth.currentUser != null) {
+                onComplete(true)
+                return
+            }
+
+            if (authAttempted) {
+                onComplete(true)
+                return
+            }
+
+            authAttempted = true
+            auth.signInAnonymously()
+                .addOnCompleteListener { task ->
+                    if (task.isSuccessful) {
+                        Log.d("FirebaseSync", "Firebase Auth successful: ${auth.currentUser?.uid}")
+                    } else {
+                        val exc = task.exception
+                        val msg = exc?.message ?: ""
+                        if (msg.contains("CONFIGURATION_NOT_FOUND", ignoreCase = true)) {
+                            Log.w("FirebaseSync", "Firebase Auth is not enabled in Firebase Console (CONFIGURATION_NOT_FOUND). Proceeding with direct Firestore sync.")
+                            isAuthDisabled = true
                         } else {
-                            Log.e("FirebaseSync", "Firebase Auth error", task.exception)
-                            onComplete(false)
+                            Log.w("FirebaseSync", "Firebase Auth warning: ${exc?.localizedMessage}")
                         }
                     }
-            } else {
-                onComplete(true)
-            }
+                    onComplete(true)
+                }
         } catch (e: Exception) {
-            Log.e("FirebaseSync", "Firebase Auth failed", e)
-            onComplete(false)
+            Log.w("FirebaseSync", "Firebase Auth not initialized or unconfigured: ${e.localizedMessage}")
+            isAuthDisabled = true
+            onComplete(true)
         }
     }
 
