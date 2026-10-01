@@ -297,7 +297,7 @@ object ReportExporter {
             PdfVoucherRow("الكمية المسلمة (بالأرقام):", "%,d نسخة".format(movement.quantity), true),
             PdfVoucherRow("الكمية المسلمة (بالحروف):", formatQuantityWords(movement.quantity)),
             PdfVoucherRow("عدد الطرود / الكراتين:", if (movement.packageCount > 0) "${movement.packageCount} طرد" else "1 طرد"),
-            PdfVoucherRow("المكلف بالتوزيع والمستودع:", movement.responsiblePerson.ifBlank { "العتير محمد" }),
+            PdfVoucherRow("المكلف بالتوزيع والمستودع:", movement.responsiblePerson.ifBlank { "المكلف بالمستودع والتسليم" }),
             PdfVoucherRow("ملاحظات التسليم:", movement.notes.ifBlank { "تم التسليم بحالة سليمة ومطابقة للمواصفات الرسمية" })
         )
 
@@ -391,7 +391,7 @@ object ReportExporter {
         paint.color = Color.DKGRAY
         paint.textSize = 9f
         paint.isFakeBoldText = false
-        canvas.drawText(movement.responsiblePerson.ifBlank { "العتير محمد" }, box2X + (sigBoxWidth / 2), sigTop + 42f, paint)
+        canvas.drawText(movement.responsiblePerson.ifBlank { "المكلف بالمستودع والتسليم" }, box2X + (sigBoxWidth / 2), sigTop + 42f, paint)
 
         // Footer
         paint.color = Color.GRAY

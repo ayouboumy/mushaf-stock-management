@@ -358,6 +358,8 @@ class StockRepository(private val database: AppDatabase) {
         )
         val newAdjId = movementDao.insertMovement(adjMovement)
         movementDao.markReversed(movementId, newAdjId, now)
+        syncManager.pushMovement(adjMovement.copy(id = newAdjId))
+        movementDao.getMovementById(movementId)?.let { syncManager.pushMovement(it) }
 
         auditLogDao.insertLog(
             AuditLogEntity(
@@ -374,6 +376,7 @@ class StockRepository(private val database: AppDatabase) {
     suspend fun softDeleteMovement(movementId: Long): Boolean {
         val movement = movementDao.getMovementById(movementId) ?: return false
         movementDao.softDeleteMovement(movementId)
+        movementDao.getMovementById(movementId)?.let { syncManager.pushMovement(it) }
         auditLogDao.insertLog(
             AuditLogEntity(
                 action = "DELETE_MOVEMENT",
@@ -455,9 +458,16 @@ class StockRepository(private val database: AppDatabase) {
     // Product CRUD
     suspend fun createProduct(product: ProductEntity, variants: List<ProductVariantEntity> = emptyList()): Long {
         val id = productDao.insertProduct(product)
+        val createdProduct = product.copy(id = id)
+        syncManager.pushProduct(createdProduct)
+
         if (variants.isNotEmpty()) {
             val variantsWithId = variants.map { it.copy(productId = id) }
-            variantDao.insertAll(variantsWithId)
+            val variantIds = variantDao.insertAll(variantsWithId)
+            variantsWithId.forEachIndexed { index, v ->
+                val vId = variantIds.getOrNull(index) ?: v.id
+                syncManager.pushVariant(v.copy(id = vId))
+            }
         }
         auditLogDao.insertLog(
             AuditLogEntity(
@@ -472,6 +482,7 @@ class StockRepository(private val database: AppDatabase) {
 
     suspend fun updateProduct(product: ProductEntity) {
         productDao.updateProduct(product)
+        syncManager.pushProduct(product)
         auditLogDao.insertLog(
             AuditLogEntity(
                 action = "UPDATE_PRODUCT",
@@ -486,6 +497,7 @@ class StockRepository(private val database: AppDatabase) {
         val prod = productDao.getProductById(productId)
         productDao.deleteProductById(productId)
         variantDao.deleteVariantsByProduct(productId)
+        syncManager.deleteProduct(productId)
         auditLogDao.insertLog(
             AuditLogEntity(
                 action = "DELETE_PRODUCT",
@@ -501,6 +513,11 @@ class StockRepository(private val database: AppDatabase) {
         val trimmedNew = newCategory.trim()
         if (trimmedOld.isBlank() || trimmedNew.isBlank() || trimmedOld == trimmedNew) return
         productDao.updateCategoryName(trimmedOld, trimmedNew)
+        // Sync updated products in this category
+        val updatedProducts = productDao.getActiveProductsList().filter { it.category == trimmedNew }
+        for (p in updatedProducts) {
+            syncManager.pushProduct(p)
+        }
         auditLogDao.insertLog(
             AuditLogEntity(
                 action = "RENAME_CATEGORY",
@@ -513,6 +530,7 @@ class StockRepository(private val database: AppDatabase) {
     // Destination CRUD
     suspend fun addDestination(destination: DestinationEntity): Long {
         val id = destinationDao.insertDestination(destination)
+        syncManager.pushDestination(destination.copy(id = id))
         auditLogDao.insertLog(
             AuditLogEntity(
                 action = "CREATE_DESTINATION",
@@ -524,19 +542,32 @@ class StockRepository(private val database: AppDatabase) {
         return id
     }
 
+    suspend fun updateDestination(destination: DestinationEntity) {
+        destinationDao.updateDestination(destination)
+        syncManager.pushDestination(destination)
+    }
+
+    suspend fun deleteDestination(destinationId: Long) {
+        destinationDao.deleteDestinationById(destinationId)
+        syncManager.deleteDestination(destinationId)
+    }
+
     suspend fun getOrCreateDestination(name: String, type: String, address: String = ""): DestinationEntity {
         val existing = destinationDao.getDestinationByName(name)
         if (existing != null) {
             if (address.isNotBlank() && existing.address != address) {
                 val updated = existing.copy(address = address)
                 destinationDao.updateDestination(updated)
+                syncManager.pushDestination(updated)
                 return updated
             }
             return existing
         }
         val newDest = DestinationEntity(name = name, type = type, address = address)
         val id = destinationDao.insertDestination(newDest)
-        return newDest.copy(id = id)
+        val withId = newDest.copy(id = id)
+        syncManager.pushDestination(withId)
+        return withId
     }
 
     suspend fun getNextVoucherSequenceNumber(): String {
@@ -567,12 +598,16 @@ class StockRepository(private val database: AppDatabase) {
         if (variantId != null) {
             val variant = variantDao.getVariantById(variantId)
             if (variant != null) {
-                variantDao.updateVariant(variant.copy(initialStock = newInitialStock))
+                val updated = variant.copy(initialStock = newInitialStock)
+                variantDao.updateVariant(updated)
+                syncManager.pushVariant(updated)
             }
         } else {
             val prod = productDao.getProductById(productId)
             if (prod != null) {
-                productDao.updateProduct(prod.copy(initialStock = newInitialStock))
+                val updated = prod.copy(initialStock = newInitialStock)
+                productDao.updateProduct(updated)
+                syncManager.pushProduct(updated)
             }
         }
         auditLogDao.insertLog(
@@ -596,24 +631,24 @@ class StockRepository(private val database: AppDatabase) {
     ) {
         val prod = productDao.getProductById(productId)
         if (prod != null) {
-            productDao.updateProduct(
-                prod.copy(
-                    nameArabic = nameArabic.ifBlank { prod.nameArabic },
-                    category = category.ifBlank { prod.category },
-                    formatType = formatType.ifBlank { prod.formatType },
-                    minimumStock = minimumStock
-                )
+            val updated = prod.copy(
+                nameArabic = nameArabic.ifBlank { prod.nameArabic },
+                category = category.ifBlank { prod.category },
+                formatType = formatType.ifBlank { prod.formatType },
+                minimumStock = minimumStock
             )
+            productDao.updateProduct(updated)
+            syncManager.pushProduct(updated)
         }
         if (variantId != null) {
             val variant = variantDao.getVariantById(variantId)
             if (variant != null) {
-                variantDao.updateVariant(
-                    variant.copy(
-                        nameArabic = variantNameArabic.ifBlank { variant.nameArabic },
-                        minimumStock = minimumStock
-                    )
+                val updatedV = variant.copy(
+                    nameArabic = variantNameArabic.ifBlank { variant.nameArabic },
+                    minimumStock = minimumStock
                 )
+                variantDao.updateVariant(updatedV)
+                syncManager.pushVariant(updatedV)
             }
         }
         auditLogDao.insertLog(
@@ -624,6 +659,25 @@ class StockRepository(private val database: AppDatabase) {
                 details = "تعديل بيانات الصنف: $nameArabic"
             )
         )
+    }
+
+    // Comprehensive Initial Cloud Sync & Fallback Seeding
+    suspend fun initialCloudSyncAndSeed() = withContext(Dispatchers.IO) {
+        try {
+            syncManager.startRealtimeListeners()
+            val cloudHasData = syncManager.pullAllFromCloud()
+            val localCount = productDao.getActiveProductsList().size
+            if (!cloudHasData && localCount == 0) {
+                seedDemoDataIfEmpty()
+                syncManager.pushAllToCloud()
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("StockRepository", "initialCloudSyncAndSeed error", e)
+            val localCount = productDao.getActiveProductsList().size
+            if (localCount == 0) {
+                seedDemoDataIfEmpty()
+            }
+        }
     }
 
     // Seed realistic demo data reflecting the actual 2026 Excel workbook

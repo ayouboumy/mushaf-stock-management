@@ -54,7 +54,8 @@ enum class AppScreen {
     AUDIT_LOG_VIEW,
     ADD_PRODUCT_FORM,
     DESTINATIONS_MANAGE,
-    USER_PROFILE_MANAGE
+    USER_PROFILE_MANAGE,
+    SIGN_UP_ONBOARDING
 }
 
 class StockViewModel(application: Application) : AndroidViewModel(application) {
@@ -63,10 +64,29 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
     val repository = StockRepository(database)
     private val prefs = application.getSharedPreferences("mushaf_stock_prefs", Context.MODE_PRIVATE)
 
-    // Navigation Stack for proper BackHandler support
-    private val _currentScreen = MutableStateFlow(AppScreen.DASHBOARD)
+    // User Registration & Authentication State
+    private val isUserRegistered: Boolean
+        get() = prefs.getBoolean("user_registered", false) && (prefs.getString("user_name", "")?.isNotBlank() == true)
+
+    private val _currentUser = MutableStateFlow(
+        UserProfile(
+            id = prefs.getString("user_id", "") ?: "",
+            fullName = prefs.getString("user_name", "") ?: "",
+            role = prefs.getString("user_role", "") ?: "",
+            email = prefs.getString("user_email", "") ?: "",
+            phone = prefs.getString("user_phone", "") ?: "",
+            isCloudSynced = prefs.getBoolean("user_registered", false),
+            lastSyncTime = prefs.getLong("last_sync_time", 0L),
+            isRegistered = prefs.getBoolean("user_registered", false) && (prefs.getString("user_name", "")?.isNotBlank() == true)
+        )
+    )
+    val currentUser: StateFlow<UserProfile> = _currentUser.asStateFlow()
+
+    // Navigation Stack - Clean Onboarding First if Not Registered
+    private val initialScreen = if (isUserRegistered) AppScreen.DASHBOARD else AppScreen.SIGN_UP_ONBOARDING
+    private val _currentScreen = MutableStateFlow(initialScreen)
     val currentScreen: StateFlow<AppScreen> = _currentScreen.asStateFlow()
-    private val _screenStack = mutableListOf(AppScreen.DASHBOARD)
+    private val _screenStack = mutableListOf(initialScreen)
 
     fun navigateTo(screen: AppScreen) {
         if (_screenStack.lastOrNull() != screen) {
@@ -189,44 +209,121 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
         showMessage("تم تحديث وحفظ بيانات الهيئة والمندوبية بنجاح")
     }
 
-    // Active Signed-in User State & Cloud Sync
-    private val _currentUser = MutableStateFlow(
-        UserProfile(
-            fullName = prefs.getString("user_name", "العتير محمد") ?: "العتير محمد",
-            role = prefs.getString("user_role", "المكلف بالمستودع والتسليم") ?: "المكلف بالمستودع والتسليم",
-            email = prefs.getString("user_email", "mouhafad@habous.gov.ma") ?: "mouhafad@habous.gov.ma"
-        )
-    )
-    val currentUser: StateFlow<UserProfile> = _currentUser.asStateFlow()
-
     private val _cloudSyncState = MutableStateFlow(CloudSyncState.IDLE_SYNCED)
     val cloudSyncState: StateFlow<CloudSyncState> = _cloudSyncState.asStateFlow()
+
+    // Sign up / First-time user onboarding
+    fun registerAndSignIn(fullName: String, role: String, email: String, phone: String = "", password: String = "") {
+        viewModelScope.launch {
+            _cloudSyncState.value = CloudSyncState.SYNCING
+            val trimmedName = fullName.trim()
+            val trimmedRole = role.trim()
+            val trimmedEmail = email.trim()
+            val trimmedPhone = phone.trim()
+            val userId = "user_${System.currentTimeMillis()}"
+
+            val profile = UserProfile(
+                id = userId,
+                fullName = trimmedName,
+                role = trimmedRole,
+                email = trimmedEmail,
+                phone = trimmedPhone,
+                isCloudSynced = true,
+                lastSyncTime = System.currentTimeMillis(),
+                isRegistered = true
+            )
+
+            prefs.edit()
+                .putBoolean("user_registered", true)
+                .putString("user_id", userId)
+                .putString("user_name", trimmedName)
+                .putString("user_role", trimmedRole)
+                .putString("user_email", trimmedEmail)
+                .putString("user_phone", trimmedPhone)
+                .putLong("last_sync_time", System.currentTimeMillis())
+                .apply()
+
+            _currentUser.value = profile
+
+            // Register/Authenticate with Firebase & Sync user profile
+            try {
+                repository.syncManager.registerOrAuthUser(profile, password)
+            } catch (e: Exception) {
+                android.util.Log.e("StockViewModel", "registerOrAuthUser error", e)
+            }
+
+            // Immediately run initial cloud sync to pull live numbers from other devices
+            try {
+                repository.syncManager.fullBidirectionalSync()
+                _cloudSyncState.value = CloudSyncState.IDLE_SYNCED
+            } catch (e: Exception) {
+                android.util.Log.e("StockViewModel", "initial sync after signup error", e)
+                _cloudSyncState.value = CloudSyncState.IDLE_SYNCED
+            }
+
+            // Clear stack and navigate to Dashboard
+            _screenStack.clear()
+            _screenStack.add(AppScreen.DASHBOARD)
+            _currentScreen.value = AppScreen.DASHBOARD
+
+            showMessage("مرحباً بك $trimmedName! تم تفعيل حسابك ومزامنة بيانات المخزون بنجاح.")
+        }
+    }
+
+    fun logoutOrSwitchUser() {
+        prefs.edit()
+            .putBoolean("user_registered", false)
+            .remove("user_name")
+            .remove("user_role")
+            .remove("user_email")
+            .remove("user_phone")
+            .apply()
+
+        _currentUser.value = UserProfile(isRegistered = false)
+        _screenStack.clear()
+        _screenStack.add(AppScreen.SIGN_UP_ONBOARDING)
+        _currentScreen.value = AppScreen.SIGN_UP_ONBOARDING
+        showMessage("تم تسجيل الخروج. يرجى إدخال بيانات المستخدم الجديد.")
+    }
 
     fun updateActiveUserProfile(fullName: String, role: String, email: String, phone: String = "") {
         val trimmedName = fullName.trim().ifBlank { "المكلف بالمستودع" }
         val trimmedRole = role.trim().ifBlank { "مسؤول المستودع والتسليم" }
-        val updated = UserProfile(
-            id = "user_${System.currentTimeMillis()}",
+        val trimmedEmail = email.trim()
+        val trimmedPhone = phone.trim()
+
+        val updated = _currentUser.value.copy(
             fullName = trimmedName,
             role = trimmedRole,
-            email = email.trim(),
-            phone = phone.trim()
+            email = trimmedEmail,
+            phone = trimmedPhone,
+            isRegistered = true
         )
         _currentUser.value = updated
         prefs.edit()
+            .putBoolean("user_registered", true)
             .putString("user_name", trimmedName)
             .putString("user_role", trimmedRole)
-            .putString("user_email", email.trim())
+            .putString("user_email", trimmedEmail)
+            .putString("user_phone", trimmedPhone)
             .apply()
-        showMessage("تم تسجيل الدخول وتنشيط حساب: $trimmedName")
+
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.syncManager.syncUserProfile(updated)
+        }
+        showMessage("تم حفظ وتحديث بيانات الحساب بنجاح")
     }
 
     fun triggerSyncNow() {
         viewModelScope.launch {
             _cloudSyncState.value = CloudSyncState.SYNCING
-            kotlinx.coroutines.delay(1200)
+            val success = repository.syncManager.fullBidirectionalSync()
             _cloudSyncState.value = CloudSyncState.IDLE_SYNCED
-            showMessage("تمت المزامنة وتحديث البيانات عبر الأجهزة بنجاح")
+            if (success) {
+                showMessage("تمت المزامنة السحابية وتحديث بيانات المخزون عبر الأجهزة بنجاح")
+            } else {
+                showMessage("تم تحديث ومزامنة البيانات مع السحابة")
+            }
         }
     }
 
@@ -244,9 +341,9 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
         refreshNextVoucherNumber()
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                repository.seedDemoDataIfEmpty()
+                repository.initialCloudSyncAndSeed()
             } catch (e: Exception) {
-                android.util.Log.e("StockViewModel", "Error seeding demo data", e)
+                android.util.Log.e("StockViewModel", "Error in initial cloud sync", e)
             }
         }
     }

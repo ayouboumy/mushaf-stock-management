@@ -1,13 +1,14 @@
 package com.example.data.model
 
 data class UserProfile(
-    val id: String = "user_default",
-    val fullName: String = "عبد الحق المرابط",
-    val role: String = "المكلف بالمستودع والتسليم",
-    val email: String = "abdellah@habous.gov.ma",
-    val phone: String = "0661002233",
-    val isCloudSynced: Boolean = true,
-    val lastSyncTime: Long = System.currentTimeMillis()
+    val id: String = "",
+    val fullName: String = "",
+    val role: String = "",
+    val email: String = "",
+    val phone: String = "",
+    val isCloudSynced: Boolean = false,
+    val lastSyncTime: Long = 0L,
+    val isRegistered: Boolean = false
 )
 
 enum class CloudSyncState {

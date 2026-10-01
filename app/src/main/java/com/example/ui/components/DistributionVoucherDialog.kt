@@ -279,7 +279,7 @@ fun DistributionVoucherDialog(
                                     VoucherItemRow("عدد الطرود / الكراتين:", if (movement.packageCount > 0) "${movement.packageCount} طرد" else "1 طرد")
                                     HorizontalDivider(color = Color(0xFFF0F4F1), thickness = 0.8.dp)
 
-                                    VoucherItemRow("المكلف بالتوزيع والمستودع:", movement.responsiblePerson.ifBlank { "العتير محمد" })
+                                    VoucherItemRow("المكلف بالتوزيع والمستودع:", movement.responsiblePerson.ifBlank { "المكلف بالمستودع والتسليم" })
 
                                     HorizontalDivider(color = Color(0xFFF0F4F1), thickness = 0.8.dp)
                                     VoucherItemRow("ملاحظات التسليم:", movement.notes.ifBlank { "تم التسليم بحالة سليمة ومطابقة للمواصفات الرسمية" })
@@ -353,7 +353,7 @@ fun DistributionVoucherDialog(
                                             fontFamily = TajawalFontFamily
                                         )
                                         Text(
-                                            text = movement.responsiblePerson.ifBlank { "العتير محمد" },
+                                            text = movement.responsiblePerson.ifBlank { "المكلف بالمستودع والتسليم" },
                                             fontSize = 9.5.sp,
                                             color = TextSecondary,
                                             fontFamily = TajawalFontFamily

@@ -128,7 +128,7 @@ fun UserProfileScreen(
                             ) {
                                 Box(contentAlignment = Alignment.Center) {
                                     Text(
-                                        text = currentUser.fullName.take(1),
+                                        text = currentUser.fullName.take(1).ifBlank { "م" },
                                         color = Color.White,
                                         fontSize = 22.sp,
                                         fontWeight = FontWeight.Bold,
@@ -280,9 +280,21 @@ fun UserProfileScreen(
                             shape = RoundedCornerShape(12.dp),
                             enabled = nameStr.isNotBlank()
                         ) {
-                            Icon(imageVector = Icons.Default.Login, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("تنشيط الحساب وتسجيل الدخول", fontFamily = TajawalFontFamily, fontWeight = FontWeight.Bold)
+                            Text("حفظ وتحديث بيانات الحساب", fontFamily = TajawalFontFamily, fontWeight = FontWeight.Bold)
+                        }
+
+                        androidx.compose.material3.OutlinedButton(
+                            onClick = { viewModel.logoutOrSwitchUser() },
+                            modifier = Modifier.fillMaxWidth().height(46.dp).testTag("logout_switch_user_btn"),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFC0392B)),
+                            border = BorderStroke(1.dp, Color(0xFFE74C3C).copy(alpha = 0.5f)),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.Login, contentDescription = null, modifier = Modifier.size(18.dp), tint = Color(0xFFC0392B))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("تسجيل الخروج / تبديل المستخدم", fontFamily = TajawalFontFamily, fontWeight = FontWeight.Bold)
                         }
                     }
                 }

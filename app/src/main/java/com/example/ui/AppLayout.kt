@@ -58,6 +58,7 @@ import com.example.ui.screens.StockInScreen
 import com.example.ui.screens.StockOutScreen
 import com.example.ui.screens.StockScreen
 import com.example.ui.screens.UserProfileScreen
+import com.example.ui.screens.SignUpOnboardingScreen
 import com.example.ui.theme.AppBackground
 import com.example.ui.theme.AppBorder
 import com.example.ui.theme.AppSurface
@@ -93,7 +94,7 @@ fun AppLayout(
     }
 
     // Handle back button on root screens
-    BackHandler(enabled = currentScreen != AppScreen.DASHBOARD) {
+    BackHandler(enabled = currentScreen != AppScreen.DASHBOARD && currentScreen != AppScreen.SIGN_UP_ONBOARDING) {
         viewModel.navigateBack()
     }
 
@@ -283,6 +284,7 @@ fun AppLayout(
                     AppScreen.AUDIT_LOG_VIEW -> AuditLogScreen(viewModel = viewModel)
                     AppScreen.EXCEL_IMPORT_WIZARD -> ExcelImportWizardScreen(viewModel = viewModel)
                     AppScreen.USER_PROFILE_MANAGE -> UserProfileScreen(viewModel = viewModel)
+                    AppScreen.SIGN_UP_ONBOARDING -> SignUpOnboardingScreen(viewModel = viewModel)
                 }
 
                 // Official Distribution Voucher Dialog
