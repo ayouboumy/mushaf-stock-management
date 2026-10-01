@@ -22,20 +22,17 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
       - name: Prepare Keystore & Environment
         run: |
-          # 1. Decode debug keystore if base64 is provided, stripping any CRLF/newlines
+          # 1. Decode debug keystore if base64 is provided, stripping any whitespace/newlines
           if [ -f "debug.keystore.base64" ]; then
             tr -d '\r\n ' < debug.keystore.base64 | base64 -d > debug.keystore 2>/dev/null || true
           fi
 
-          # 2. If debug.keystore is missing or 0 bytes, generate a valid debug keystore with keytool
+          # 2. If debug.keystore is missing or empty, generate a valid debug keystore
           if [ ! -s "debug.keystore" ]; then
             echo "Generating debug.keystore with keytool..."
             keytool -genkeypair -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
@@ -50,11 +47,16 @@ jobs:
             fi
           fi
 
-          # 4. Ensure gradlew is executable
+          # 4. Make gradlew executable
           chmod +x gradlew
 
-          # 5. Accept any missing Android SDK licenses
-          yes | sdkmanager --licenses 2>/dev/null || true
+          # 5. Automatically accept Android SDK licenses using pre-installed Android SDK
+          if [ -n "$ANDROID_HOME" ] && [ -d "$ANDROID_HOME" ]; then
+            mkdir -p "$ANDROID_HOME/licenses" || true
+            echo -e "24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e\n2fa8c25502371fb36b476077a204003e3ddf45c4" > "$ANDROID_HOME/licenses/android-sdk-license" || true
+            echo -e "84831b9409646a918e30573bab4c9c91346d8abd\n504667f4c0de7af1a06de9f4b1727b816f454d0e" > "$ANDROID_HOME/licenses/android-sdk-preview-license" || true
+            yes | sdkmanager --licenses 2>/dev/null || yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses 2>/dev/null || true
+          fi
 
       - name: Build Debug APK
         run: ./gradlew assembleDebug --no-daemon --no-configuration-cache --stacktrace
