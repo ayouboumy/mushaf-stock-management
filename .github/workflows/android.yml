@@ -22,18 +22,26 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
       - name: Prepare Keystore & Environment
         run: |
+          # 1. Decode debug keystore if base64 is provided, stripping any CRLF/newlines
           if [ -f "debug.keystore.base64" ]; then
-            (base64 -d debug.keystore.base64 > debug.keystore 2>/dev/null || base64 -di debug.keystore.base64 > debug.keystore 2>/dev/null) || true
+            tr -d '\r\n ' < debug.keystore.base64 | base64 -d > debug.keystore 2>/dev/null || true
           fi
+
+          # 2. If debug.keystore is missing or 0 bytes, generate a valid debug keystore with keytool
           if [ ! -s "debug.keystore" ]; then
-            echo "Generating fallback debug.keystore with keytool..."
+            echo "Generating debug.keystore with keytool..."
             keytool -genkeypair -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
+
+          # 3. Create .env if missing to satisfy Secrets Gradle plugin
           if [ ! -f ".env" ]; then
             if [ -f ".env.example" ]; then
               cp .env.example .env
@@ -41,11 +49,15 @@ jobs:
               touch .env
             fi
           fi
+
+          # 4. Ensure gradlew is executable
           chmod +x gradlew
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses 2>/dev/null || true
+
+          # 5. Accept any missing Android SDK licenses
+          yes | sdkmanager --licenses 2>/dev/null || true
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        run: ./gradlew assembleDebug --no-daemon --no-configuration-cache --stacktrace
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
