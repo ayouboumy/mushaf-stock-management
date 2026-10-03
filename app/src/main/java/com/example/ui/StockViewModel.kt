@@ -840,35 +840,15 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun resetToDemoData() {
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                repository.clearAllData()
-                repository.seedDemoDataIfEmpty()
-                withContext(Dispatchers.Main) {
-                    _selectedProduct.value = null
-                    refreshNextVoucherNumber()
-                    generateReport()
-                    loadSampleSheetForImport(ExcelImportHelper.WORKBOOK_SHEETS[0])
-                    showMessage("تمت إعادة ضبط البيانات النموذجية لعام 2026 بنجاح")
-                }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    showMessage("تعذر إعادة الضبط: ${e.message ?: "خطأ غير معروف"}")
-                }
-            }
-        }
-    }
-
     fun clearAllData() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                repository.clearAllData()
+                repository.clearAllData(clearCloud = true)
                 withContext(Dispatchers.Main) {
                     _selectedProduct.value = null
                     refreshNextVoucherNumber()
                     generateReport()
-                    showMessage("تم مسح كافة البيانات بنجاح")
+                    showMessage("تم مسح وتصفير كافة البيانات محلياً وسحابياً بنجاح")
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {

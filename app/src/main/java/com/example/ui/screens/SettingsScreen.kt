@@ -83,7 +83,6 @@ fun SettingsScreen(
     var editOrgName by remember { mutableStateOf(orgName) }
     var editDeptName by remember { mutableStateOf(deptName) }
 
-    var showResetDemoDialog by remember { mutableStateOf(false) }
     var showClearDataDialog by remember { mutableStateOf(false) }
 
     LazyColumn(
@@ -285,16 +284,9 @@ fun SettingsScreen(
             ) {
                 Column {
                     SettingsRow(
-                        icon = Icons.Default.RestartAlt,
-                        title = "إعادة ضبط البيانات النموذجية",
-                        subtitle = "استعادة عينة المصاحف الرسمية لعام 2026",
-                        onClick = { showResetDemoDialog = true }
-                    )
-                    HorizontalDivider(color = AppBorder, thickness = 0.8.dp)
-                    SettingsRow(
                         icon = Icons.Default.DeleteForever,
                         title = "مسح كافة البيانات",
-                        subtitle = "تصفير قاعدة البيانات بالكامل",
+                        subtitle = "تصفير قاعدة البيانات بالكامل (محلياً وسحابياً)",
                         onClick = { showClearDataDialog = true },
                         textColor = StockEmpty
                     )
@@ -353,49 +345,6 @@ fun SettingsScreen(
             dismissButton = {
                 OutlinedButton(
                     onClick = { showEditInstitutionDialog = false },
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Text("إلغاء", fontFamily = CairoFontFamily, color = TextSecondary)
-                }
-            }
-        )
-    }
-
-    // Reset Demo Dialog
-    if (showResetDemoDialog) {
-        AlertDialog(
-            onDismissRequest = { showResetDemoDialog = false },
-            shape = RoundedCornerShape(14.dp),
-            containerColor = AppSurface,
-            title = {
-                Text(
-                    text = "استعادة البيانات النموذجية",
-                    style = MaterialTheme.typography.titleMedium.copy(fontFamily = CairoFontFamily, fontWeight = FontWeight.Bold, color = TextPrimary)
-                )
-            },
-            text = {
-                Text(
-                    text = "سيتم استبدال البيانات الحالية بسجلات التوزيع الرسمية لعام 2026. هل تريد المتابعة؟",
-                    fontFamily = CairoFontFamily,
-                    fontSize = 12.5.sp,
-                    color = TextSecondary
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        viewModel.resetToDemoData()
-                        showResetDemoDialog = false
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Text("تأكيد الاستعادة", fontFamily = CairoFontFamily, fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                OutlinedButton(
-                    onClick = { showResetDemoDialog = false },
                     shape = RoundedCornerShape(10.dp)
                 ) {
                     Text("إلغاء", fontFamily = CairoFontFamily, color = TextSecondary)
