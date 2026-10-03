@@ -345,6 +345,7 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: Exception) {
                 android.util.Log.e("StockViewModel", "Error in initial cloud sync", e)
             }
+            generateReport()
         }
     }
 
@@ -874,15 +875,6 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
                     showMessage("تعذر مسح البيانات: ${e.message ?: "خطأ غير معروف"}")
                 }
             }
-        }
-    }
-
-    init {
-        // App starts with empty database by default (no sample data automatically loaded on install)
-        viewModelScope.launch {
-            repository.clearAllData()
-            generateReport()
-            loadSampleSheetForImport(ExcelImportHelper.WORKBOOK_SHEETS[0])
         }
     }
 }

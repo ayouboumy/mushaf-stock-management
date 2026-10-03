@@ -95,7 +95,7 @@ fun DashboardScreen(
     val outCopies = allCalculated.filter { it.status == StockStatus.OUT_OF_STOCK }.sumOf { it.currentStock }
     val todayMovementsCount = recentMovements.size
 
-    val availablePercent = if (totalCopies > 0) (availableCopies.toFloat() / totalCopies * 100).toInt() else 100
+    val availablePercent = if (totalCopies > 0) (availableCopies.toFloat() / totalCopies * 100).toInt() else 0
     val lowPercent = if (totalCopies > 0) (lowCopies.toFloat() / totalCopies * 100).toInt() else 0
     val outPercent = if (totalCopies > 0) (outCopies.toFloat() / totalCopies * 100).toInt() else 0
 

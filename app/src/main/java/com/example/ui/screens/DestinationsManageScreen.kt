@@ -5,6 +5,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -265,6 +266,31 @@ fun DestinationsManageScreen(
                             ) {
                                 Text("حفظ الوجهة في السجل", fontFamily = CairoFontFamily, fontWeight = FontWeight.Bold)
                             }
+                        }
+                    }
+                }
+            }
+
+            if (destinations.isEmpty() && !showAddForm) {
+                item {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        color = AppSurface,
+                        border = BorderStroke(1.dp, CardBorder)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(32.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "لا توجد وجهات مسجلة حتى الآن",
+                                fontFamily = CairoFontFamily,
+                                fontSize = 13.sp,
+                                color = TextMuted
+                            )
                         }
                     }
                 }

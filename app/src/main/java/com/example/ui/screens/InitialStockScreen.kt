@@ -138,7 +138,44 @@ fun InitialStockScreen(
                 }
             }
 
-            items(stockList, key = { "${it.productId}_${it.variantId ?: 0}" }) { item ->
+            if (stockList.isEmpty()) {
+                item {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        color = AppSurface,
+                        border = BorderStroke(1.dp, AppBorder)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(32.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "لا توجد أصناف مسجلة حتى الآن",
+                                color = TextPrimary,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = CairoFontFamily
+                            )
+                            Text(
+                                text = "يمكنك إضافة صنف جديد من شاشة المخزون لضبط رصيده الافتتاحي",
+                                color = TextSecondary,
+                                fontSize = 12.sp,
+                                fontFamily = CairoFontFamily
+                            )
+                            Button(
+                                onClick = { viewModel.navigateTo(AppScreen.ADD_PRODUCT_FORM) },
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+                            ) {
+                                Text("إضافة صنف جديد", fontSize = 12.sp, fontFamily = CairoFontFamily, fontWeight = FontWeight.Bold, color = Color.White)
+                            }
+                        }
+                    }
+                }
+            } else {
+                items(stockList, key = { "${it.productId}_${it.variantId ?: 0}" }) { item ->
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(18.dp),
@@ -332,4 +369,5 @@ fun InitialStockScreen(
             }
         }
     }
+}
 }

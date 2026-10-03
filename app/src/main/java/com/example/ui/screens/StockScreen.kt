@@ -222,6 +222,7 @@ fun StockScreen(
 
             // Clean Inventory Rows inside a single unified surface (NOT 10 Giant Cards)
             if (stockList.isEmpty()) {
+                val isFiltered = searchQuery.isNotBlank() || categoryFilter != "ALL"
                 item {
                     Surface(
                         modifier = Modifier.fillMaxWidth(),
@@ -235,27 +236,43 @@ fun StockScreen(
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Icon(
-                                imageVector = Icons.Default.FilterList,
+                                imageVector = if (isFiltered) Icons.Default.FilterList else Icons.Default.MenuBook,
                                 contentDescription = null,
                                 tint = TextMuted,
                                 modifier = Modifier.size(36.dp)
                             )
                             Text(
-                                text = "لا توجد أصناف مطابقة",
+                                text = if (isFiltered) "لا توجد أصناف مطابقة" else "لا توجد أصناف في المخزون",
                                 color = TextPrimary,
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold,
                                 fontFamily = CairoFontFamily
                             )
-                            Button(
-                                onClick = {
-                                    viewModel.stockSearchQuery.value = ""
-                                    viewModel.stockCategoryFilter.value = "ALL"
-                                },
-                                shape = RoundedCornerShape(8.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
-                            ) {
-                                Text("إعادة تعيين الفلتر", fontSize = 12.sp, fontFamily = CairoFontFamily, fontWeight = FontWeight.Bold, color = Color.White)
+                            if (isFiltered) {
+                                Button(
+                                    onClick = {
+                                        viewModel.stockSearchQuery.value = ""
+                                        viewModel.stockCategoryFilter.value = "ALL"
+                                    },
+                                    shape = RoundedCornerShape(8.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+                                ) {
+                                    Text("إعادة تعيين الفلتر", fontSize = 12.sp, fontFamily = CairoFontFamily, fontWeight = FontWeight.Bold, color = Color.White)
+                                }
+                            } else {
+                                Text(
+                                    text = "ابدأ بإضافة أول صنف لمتابعة مخزونه وحركاته",
+                                    color = TextSecondary,
+                                    fontSize = 12.sp,
+                                    fontFamily = CairoFontFamily
+                                )
+                                Button(
+                                    onClick = { viewModel.navigateTo(AppScreen.ADD_PRODUCT_FORM) },
+                                    shape = RoundedCornerShape(8.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+                                ) {
+                                    Text("إضافة صنف جديد", fontSize = 12.sp, fontFamily = CairoFontFamily, fontWeight = FontWeight.Bold, color = Color.White)
+                                }
                             }
                         }
                     }
