@@ -89,6 +89,17 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
     val currentScreen: StateFlow<AppScreen> = _currentScreen.asStateFlow()
     private val _screenStack = mutableListOf(initialScreen)
 
+    init {
+        viewModelScope.launch {
+            try {
+                repository.syncManager.diagnoseConnection()
+                repository.syncManager.fullBidirectionalSync()
+            } catch (e: Exception) {
+                android.util.Log.e("StockViewModel", "Startup sync check failed", e)
+            }
+        }
+    }
+
     fun navigateTo(screen: AppScreen) {
         if (_screenStack.lastOrNull() != screen) {
             _screenStack.add(screen)

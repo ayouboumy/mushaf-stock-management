@@ -355,7 +355,7 @@ fun UserProfileScreen(
                                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                             Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, tint = EmeraldPrimary, modifier = Modifier.size(18.dp))
                                             Text(
-                                                text = "متصل بنجاح بسحابة Firestore",
+                                                text = "متصل بنجاح بسحابة Firestore (mushaf-stock)",
                                                 fontFamily = TajawalFontFamily,
                                                 fontWeight = FontWeight.Bold,
                                                 color = EmeraldPrimary,
@@ -382,7 +382,7 @@ fun UserProfileScreen(
                                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                             Icon(imageVector = Icons.Default.Warning, contentDescription = null, tint = Color(0xFFD35400), modifier = Modifier.size(20.dp))
                                             Text(
-                                                text = "قاعدة بيانات Firestore محذوفة أو غير مفعلة",
+                                                text = "تنبيه في الاتصال بقاعدة البيانات",
                                                 fontFamily = TajawalFontFamily,
                                                 fontWeight = FontWeight.Bold,
                                                 color = Color(0xFFD35400),
@@ -390,27 +390,54 @@ fun UserProfileScreen(
                                             )
                                         }
                                         Text(
-                                            text = "لقد تم حذف قاعدة بيانات Firestore من منصة Firebase Console لمشروع mushaf-stock، لذلك تعذر إجراء المزامنة.",
+                                            text = diag.message,
                                             fontFamily = TajawalFontFamily,
                                             color = TextPrimary,
                                             fontSize = 11.5.sp,
                                             lineHeight = 16.sp
                                         )
-                                        Surface(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            shape = RoundedCornerShape(8.dp),
-                                            color = Color.White.copy(alpha = 0.85f),
-                                            border = BorderStroke(0.8.dp, Color(0xFFE67E22).copy(alpha = 0.4f))
-                                        ) {
-                                            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                                Text("خطوات إعادة إنشاء قاعدة البيانات في Firebase Console:", fontFamily = TajawalFontFamily, fontWeight = FontWeight.Bold, fontSize = 11.5.sp, color = TextPrimary)
-                                                Text("1. افتح منصة Firebase Console: console.firebase.google.com", fontFamily = TajawalFontFamily, fontSize = 11.sp, color = TextSecondary)
-                                                Text("2. ادخل إلى مشروعك (mushaf-stock).", fontFamily = TajawalFontFamily, fontSize = 11.sp, color = TextSecondary)
-                                                Text("3. من القائمة الجانبية اختر Build ثم Firestore Database.", fontFamily = TajawalFontFamily, fontSize = 11.sp, color = TextSecondary)
-                                                Text("4. اضغط على زر 'Create database' (إنشاء قاعدة بيانات).", fontFamily = TajawalFontFamily, fontSize = 11.sp, color = TextSecondary)
-                                                Text("5. اترك المعرف كما هو: (default) واختر موقع الخادم القريب (مثل europe-west1).", fontFamily = TajawalFontFamily, fontSize = 11.sp, color = TextSecondary)
-                                                Text("6. اختر وضع الاختبار (Start in test mode) ثم اضغط Create / Enable.", fontFamily = TajawalFontFamily, fontSize = 11.sp, color = TextSecondary)
-                                            }
+                                        if (diag.technicalDetail.isNotBlank()) {
+                                            Text(
+                                                text = "التفاصيل: ${diag.technicalDetail}",
+                                                fontFamily = TajawalFontFamily,
+                                                color = TextSecondary,
+                                                fontSize = 10.5.sp
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            is CloudSyncDiagnostic.GeneralError -> {
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = Color(0xFFFDEDEC),
+                                    border = BorderStroke(1.dp, Color(0xFFE74C3C).copy(alpha = 0.5f))
+                                ) {
+                                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            Icon(imageVector = Icons.Default.Warning, contentDescription = null, tint = Color(0xFFC0392B), modifier = Modifier.size(18.dp))
+                                            Text(
+                                                text = "تنبيه أثناء الاتصال السحابي",
+                                                fontFamily = TajawalFontFamily,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFFC0392B),
+                                                fontSize = 12.sp
+                                            )
+                                        }
+                                        Text(
+                                            text = diag.message,
+                                            fontFamily = TajawalFontFamily,
+                                            color = TextSecondary,
+                                            fontSize = 11.sp
+                                        )
+                                        if (diag.technicalDetail.isNotBlank()) {
+                                            Text(
+                                                text = diag.technicalDetail,
+                                                fontFamily = TajawalFontFamily,
+                                                color = TextSecondary.copy(alpha = 0.8f),
+                                                fontSize = 10.sp
+                                            )
                                         }
                                     }
                                 }

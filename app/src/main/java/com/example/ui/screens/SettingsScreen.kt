@@ -205,8 +205,9 @@ fun SettingsScreen(
                 ) {
                     Column {
                         val cloudSubtitle = when (syncDiagnostic) {
-                            is CloudSyncDiagnostic.Connected -> "متصل بسحابة Firestore (default)"
-                            is CloudSyncDiagnostic.DatabaseNotFound -> "⚠️ قاعدة بيانات Firestore محذوفة في Firebase"
+                            is CloudSyncDiagnostic.Connected -> "متصل بسحابة Firestore (mushaf-stock)"
+                            is CloudSyncDiagnostic.Checking -> "جاري فحص الاتصال السحابي..."
+                            is CloudSyncDiagnostic.DatabaseNotFound -> "⚠️ تعذر الاتصال بـ Firestore"
                             is CloudSyncDiagnostic.PermissionDenied -> "⚠️ إذن الوصول مرفوض (قواعد Rules)"
                             is CloudSyncDiagnostic.NetworkError -> "تعذر الاتصال بالإنترنت"
                             else -> "إدارة هوية المسؤول والمزامنة السحابية"
@@ -216,7 +217,7 @@ fun SettingsScreen(
                             title = "حساب المستخدم والمزامنة السحابية",
                             subtitle = cloudSubtitle,
                             onClick = { viewModel.navigateTo(AppScreen.USER_PROFILE_MANAGE) },
-                            textColor = if (syncDiagnostic is CloudSyncDiagnostic.DatabaseNotFound) StockEmpty else TextPrimary
+                            textColor = if (syncDiagnostic is CloudSyncDiagnostic.DatabaseNotFound || syncDiagnostic is CloudSyncDiagnostic.PermissionDenied) StockEmpty else TextPrimary
                         )
                         HorizontalDivider(color = AppBorder, thickness = 0.8.dp)
                         SettingsRow(
