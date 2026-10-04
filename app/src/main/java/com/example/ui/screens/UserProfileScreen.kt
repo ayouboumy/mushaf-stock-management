@@ -23,17 +23,20 @@ import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Badge
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudDone
+import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Login
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -53,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.model.CloudSyncState
+import com.example.data.sync.CloudSyncDiagnostic
 import com.example.ui.StockViewModel
 import com.example.ui.components.AppHeader
 import com.example.ui.theme.AppBackground
@@ -79,6 +83,9 @@ fun UserProfileScreen(
 
     val currentUser by viewModel.currentUser.collectAsStateWithLifecycle()
     val syncState by viewModel.cloudSyncState.collectAsStateWithLifecycle()
+    val syncDiagnostic by viewModel.syncDiagnostic.collectAsStateWithLifecycle()
+    val syncError by viewModel.syncError.collectAsStateWithLifecycle()
+    val lastSyncTimestamp by viewModel.lastSyncTimestamp.collectAsStateWithLifecycle()
 
     var nameStr by remember(currentUser) { mutableStateOf(currentUser.fullName) }
     var roleStr by remember(currentUser) { mutableStateOf(currentUser.role) }
@@ -311,7 +318,7 @@ fun UserProfileScreen(
                 ) {
                     Column(
                         modifier = Modifier.padding(18.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -328,27 +335,211 @@ fun UserProfileScreen(
                         }
 
                         Text(
-                            text = "تتيح المزامنة مشاركة أعداد المخزون، السندات، وسجل الحركات لحظياً بين جميع الهواتف واللوحات الخاصة بأعضاء الفريق.",
+                            text = "تتيح المزامنة مشاركة أعداد المخزون، السندات، وسجل الحركات لحظياً بين جميع هواتف المسؤولين عبر سحابة Google Firebase Firestore.",
                             fontSize = 12.sp,
                             color = TextSecondary,
                             fontFamily = TajawalFontFamily,
                             lineHeight = 17.sp
                         )
 
-                        Button(
-                            onClick = { viewModel.triggerSyncNow() },
-                            modifier = Modifier.fillMaxWidth().height(44.dp).testTag("btn_trigger_sync"),
-                            colors = ButtonDefaults.buttonColors(containerColor = GoldPrimary),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Icon(imageVector = Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                if (syncState == CloudSyncState.SYNCING) "جاري المزامنة مع السحابة..." else "مزامنة البيانات الآن",
-                                fontFamily = TajawalFontFamily,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White
-                            )
+                        // Live Diagnostic State Indicator
+                        when (val diag = syncDiagnostic) {
+                            is CloudSyncDiagnostic.Connected -> {
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = EmeraldContainer,
+                                    border = BorderStroke(1.dp, EmeraldPrimary.copy(alpha = 0.4f))
+                                ) {
+                                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, tint = EmeraldPrimary, modifier = Modifier.size(18.dp))
+                                            Text(
+                                                text = "متصل بنجاح بسحابة Firestore",
+                                                fontFamily = TajawalFontFamily,
+                                                fontWeight = FontWeight.Bold,
+                                                color = EmeraldPrimary,
+                                                fontSize = 13.sp
+                                            )
+                                        }
+                                        Text(
+                                            text = "قاعدة البيانات الافتراضية (default) مفعلة وجاهزة للمزامنة اللحظية بين الأجهزة.",
+                                            fontFamily = TajawalFontFamily,
+                                            color = TextSecondary,
+                                            fontSize = 11.5.sp
+                                        )
+                                    }
+                                }
+                            }
+                            is CloudSyncDiagnostic.DatabaseNotFound -> {
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = Color(0xFFFDEBD0).copy(alpha = 0.7f),
+                                    border = BorderStroke(1.2.dp, Color(0xFFE67E22))
+                                ) {
+                                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            Icon(imageVector = Icons.Default.Warning, contentDescription = null, tint = Color(0xFFD35400), modifier = Modifier.size(20.dp))
+                                            Text(
+                                                text = "قاعدة بيانات Firestore محذوفة أو غير مفعلة",
+                                                fontFamily = TajawalFontFamily,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFFD35400),
+                                                fontSize = 13.sp
+                                            )
+                                        }
+                                        Text(
+                                            text = "لقد تم حذف قاعدة بيانات Firestore من منصة Firebase Console لمشروع mushaf-stock، لذلك تعذر إجراء المزامنة.",
+                                            fontFamily = TajawalFontFamily,
+                                            color = TextPrimary,
+                                            fontSize = 11.5.sp,
+                                            lineHeight = 16.sp
+                                        )
+                                        Surface(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = Color.White.copy(alpha = 0.85f),
+                                            border = BorderStroke(0.8.dp, Color(0xFFE67E22).copy(alpha = 0.4f))
+                                        ) {
+                                            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                Text("خطوات إعادة إنشاء قاعدة البيانات في Firebase Console:", fontFamily = TajawalFontFamily, fontWeight = FontWeight.Bold, fontSize = 11.5.sp, color = TextPrimary)
+                                                Text("1. افتح منصة Firebase Console: console.firebase.google.com", fontFamily = TajawalFontFamily, fontSize = 11.sp, color = TextSecondary)
+                                                Text("2. ادخل إلى مشروعك (mushaf-stock).", fontFamily = TajawalFontFamily, fontSize = 11.sp, color = TextSecondary)
+                                                Text("3. من القائمة الجانبية اختر Build ثم Firestore Database.", fontFamily = TajawalFontFamily, fontSize = 11.sp, color = TextSecondary)
+                                                Text("4. اضغط على زر 'Create database' (إنشاء قاعدة بيانات).", fontFamily = TajawalFontFamily, fontSize = 11.sp, color = TextSecondary)
+                                                Text("5. اترك المعرف كما هو: (default) واختر موقع الخادم القريب (مثل europe-west1).", fontFamily = TajawalFontFamily, fontSize = 11.sp, color = TextSecondary)
+                                                Text("6. اختر وضع الاختبار (Start in test mode) ثم اضغط Create / Enable.", fontFamily = TajawalFontFamily, fontSize = 11.sp, color = TextSecondary)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            is CloudSyncDiagnostic.PermissionDenied -> {
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = Color(0xFFFADBD8).copy(alpha = 0.7f),
+                                    border = BorderStroke(1.2.dp, Color(0xFFC0392B))
+                                ) {
+                                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            Icon(imageVector = Icons.Default.Warning, contentDescription = null, tint = Color(0xFFC0392B), modifier = Modifier.size(20.dp))
+                                            Text(
+                                                text = "قواعد الأمان في Firestore تمنع الوصول",
+                                                fontFamily = TajawalFontFamily,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFFC0392B),
+                                                fontSize = 13.sp
+                                            )
+                                        }
+                                        Text(
+                                            text = "في منصة Firebase Console > Firestore Database > Rules، يرجى تفعيل القواعد بالسماح بالقراءة والكتابة: allow read, write: if true;",
+                                            fontFamily = TajawalFontFamily,
+                                            color = TextPrimary,
+                                            fontSize = 11.5.sp
+                                        )
+                                    }
+                                }
+                            }
+                            is CloudSyncDiagnostic.NetworkError -> {
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = Color(0xFFF5EEF8),
+                                    border = BorderStroke(1.dp, Color(0xFFA569BD))
+                                ) {
+                                    Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Icon(imageVector = Icons.Default.CloudOff, contentDescription = null, tint = Color(0xFFA569BD), modifier = Modifier.size(20.dp))
+                                        Text(
+                                            text = "تعذر الاتصال بالخادم، يرجى التحقق من اتصال الإنترنت بالجهاز.",
+                                            fontFamily = TajawalFontFamily,
+                                            color = TextPrimary,
+                                            fontSize = 12.sp
+                                        )
+                                    }
+                                }
+                            }
+                            is CloudSyncDiagnostic.Checking -> {
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = GoldContainer,
+                                    border = BorderStroke(1.dp, GoldBorder)
+                                ) {
+                                    Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Icon(imageVector = Icons.Default.Sync, contentDescription = null, tint = GoldPrimary, modifier = Modifier.size(20.dp))
+                                        Text(
+                                            text = "جاري فحص الاتصال بقاعدة بيانات Firestore...",
+                                            fontFamily = TajawalFontFamily,
+                                            color = TextPrimary,
+                                            fontSize = 12.sp
+                                        )
+                                    }
+                                }
+                            }
+                            else -> {
+                                if (syncError != null) {
+                                    Surface(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = Color(0xFFFDEDEC),
+                                        border = BorderStroke(1.dp, Color(0xFFE74C3C).copy(alpha = 0.5f))
+                                    ) {
+                                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            Text(
+                                                text = "تنبيه أثناء الاتصال السحابي:",
+                                                fontFamily = TajawalFontFamily,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFFC0392B),
+                                                fontSize = 12.sp
+                                            )
+                                            Text(
+                                                text = syncError ?: "",
+                                                fontFamily = TajawalFontFamily,
+                                                color = TextSecondary,
+                                                fontSize = 11.sp
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = { viewModel.triggerSyncNow() },
+                                modifier = Modifier.weight(1f).height(44.dp).testTag("btn_trigger_sync"),
+                                colors = ButtonDefaults.buttonColors(containerColor = GoldPrimary),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Icon(imageVector = Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(17.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    if (syncState == CloudSyncState.SYNCING) "جاري المزامنة..." else "مزامنة البيانات",
+                                    fontFamily = TajawalFontFamily,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White,
+                                    fontSize = 12.5.sp
+                                )
+                            }
+
+                            OutlinedButton(
+                                onClick = { viewModel.checkCloudConnection() },
+                                modifier = Modifier.weight(1f).height(44.dp).testTag("btn_check_connection"),
+                                shape = RoundedCornerShape(12.dp),
+                                border = BorderStroke(1.dp, GoldPrimary.copy(alpha = 0.7f))
+                            ) {
+                                Icon(imageVector = Icons.Default.CloudDone, contentDescription = null, tint = GoldPrimary, modifier = Modifier.size(17.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    "فحص الاتصال",
+                                    fontFamily = TajawalFontFamily,
+                                    fontWeight = FontWeight.Bold,
+                                    color = GoldPrimary,
+                                    fontSize = 12.5.sp
+                                )
+                            }
                         }
                     }
                 }

@@ -56,6 +56,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.data.sync.CloudSyncDiagnostic
 import com.example.ui.AppScreen
 import com.example.ui.StockViewModel
 import com.example.ui.theme.AppBackground
@@ -78,6 +79,7 @@ fun SettingsScreen(
     val allowNegativeStock by viewModel.allowNegativeStock.collectAsStateWithLifecycle()
     val orgName by viewModel.organizationName.collectAsStateWithLifecycle()
     val deptName by viewModel.departmentName.collectAsStateWithLifecycle()
+    val syncDiagnostic by viewModel.syncDiagnostic.collectAsStateWithLifecycle()
 
     var showEditInstitutionDialog by remember { mutableStateOf(false) }
     var editOrgName by remember { mutableStateOf(orgName) }
@@ -202,11 +204,19 @@ fun SettingsScreen(
                     border = BorderStroke(1.dp, AppBorder)
                 ) {
                     Column {
+                        val cloudSubtitle = when (syncDiagnostic) {
+                            is CloudSyncDiagnostic.Connected -> "متصل بسحابة Firestore (default)"
+                            is CloudSyncDiagnostic.DatabaseNotFound -> "⚠️ قاعدة بيانات Firestore محذوفة في Firebase"
+                            is CloudSyncDiagnostic.PermissionDenied -> "⚠️ إذن الوصول مرفوض (قواعد Rules)"
+                            is CloudSyncDiagnostic.NetworkError -> "تعذر الاتصال بالإنترنت"
+                            else -> "إدارة هوية المسؤول والمزامنة السحابية"
+                        }
                         SettingsRow(
                             icon = Icons.Default.AccountCircle,
                             title = "حساب المستخدم والمزامنة السحابية",
-                            subtitle = "إدارة هوية المسؤول وتسجيل الدخول",
-                            onClick = { viewModel.navigateTo(AppScreen.USER_PROFILE_MANAGE) }
+                            subtitle = cloudSubtitle,
+                            onClick = { viewModel.navigateTo(AppScreen.USER_PROFILE_MANAGE) },
+                            textColor = if (syncDiagnostic is CloudSyncDiagnostic.DatabaseNotFound) StockEmpty else TextPrimary
                         )
                         HorizontalDivider(color = AppBorder, thickness = 0.8.dp)
                         SettingsRow(

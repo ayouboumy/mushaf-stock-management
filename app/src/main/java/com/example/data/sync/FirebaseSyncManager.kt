@@ -21,6 +21,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 
+sealed class CloudSyncDiagnostic {
+    object Idle : CloudSyncDiagnostic()
+    object Checking : CloudSyncDiagnostic()
+    object Connected : CloudSyncDiagnostic()
+    data class DatabaseNotFound(val message: String, val technicalDetail: String) : CloudSyncDiagnostic()
+    data class PermissionDenied(val message: String, val technicalDetail: String) : CloudSyncDiagnostic()
+    data class NetworkError(val message: String, val technicalDetail: String) : CloudSyncDiagnostic()
+    data class GeneralError(val message: String, val technicalDetail: String) : CloudSyncDiagnostic()
+}
+
 class FirebaseSyncManager(private val database: AppDatabase) {
 
     private val firestore: FirebaseFirestore by lazy { FirebaseFirestore.getInstance() }
@@ -41,12 +51,61 @@ class FirebaseSyncManager(private val database: AppDatabase) {
     private val _syncError = MutableStateFlow<String?>(null)
     val syncError: StateFlow<String?> = _syncError.asStateFlow()
 
+    private val _syncDiagnostic = MutableStateFlow<CloudSyncDiagnostic>(CloudSyncDiagnostic.Idle)
+    val syncDiagnostic: StateFlow<CloudSyncDiagnostic> = _syncDiagnostic.asStateFlow()
+
+    fun parseErrorToDiagnostic(e: Throwable): CloudSyncDiagnostic {
+        val msg = e.message ?: e.localizedMessage ?: "Unknown error"
+        return when {
+            msg.contains("NOT_FOUND", ignoreCase = true) || msg.contains("does not exist", ignoreCase = true) || msg.contains("404", ignoreCase = true) -> {
+                CloudSyncDiagnostic.DatabaseNotFound(
+                    message = "قاعدة بيانات Firestore الافتراضية (default) محذوفة أو غير مفعلة في مشروع Firebase.",
+                    technicalDetail = msg
+                )
+            }
+            msg.contains("PERMISSION_DENIED", ignoreCase = true) || msg.contains("Missing or insufficient permissions", ignoreCase = true) -> {
+                CloudSyncDiagnostic.PermissionDenied(
+                    message = "قواعد الأمان (Rules) في Firestore تمنع قراءة أو كتابة البيانات.",
+                    technicalDetail = msg
+                )
+            }
+            msg.contains("UNAVAILABLE", ignoreCase = true) || msg.contains("network", ignoreCase = true) || msg.contains("offline", ignoreCase = true) -> {
+                CloudSyncDiagnostic.NetworkError(
+                    message = "تعذر الاتصال بخوادم Firebase (يرجى التحقق من اتصال الإنترنت).",
+                    technicalDetail = msg
+                )
+            }
+            else -> {
+                CloudSyncDiagnostic.GeneralError(
+                    message = "خطأ في المزامنة السحابية: $msg",
+                    technicalDetail = msg
+                )
+            }
+        }
+    }
+
+    suspend fun diagnoseConnection(): CloudSyncDiagnostic = withContext(Dispatchers.IO) {
+        _syncDiagnostic.value = CloudSyncDiagnostic.Checking
+        try {
+            ensureAuth()
+            firestore.collection("products").limit(1).get().await()
+            _syncError.value = null
+            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+            CloudSyncDiagnostic.Connected
+        } catch (e: Exception) {
+            val diag = parseErrorToDiagnostic(e)
+            _syncError.value = e.localizedMessage ?: e.message
+            _syncDiagnostic.value = diag
+            diag
+        }
+    }
+
     @Volatile
     private var authAttempted = false
     @Volatile
     private var isAuthDisabled = false
 
-    // Ensure user is signed in to Firebase Auth (anonymous or real)
+    // Ensure user is signed in to Firebase Auth if available, otherwise direct Firestore access
     suspend fun ensureAuth(): Boolean {
         if (isAuthDisabled) return true
         if (auth.currentUser != null) return true
@@ -56,15 +115,9 @@ class FirebaseSyncManager(private val database: AppDatabase) {
             Log.d("FirebaseSync", "Firebase anonymous auth successful: ${auth.currentUser?.uid}")
             true
         } catch (e: Exception) {
-            val msg = e.localizedMessage ?: ""
-            if (msg.contains("CONFIGURATION_NOT_FOUND", ignoreCase = true) ||
-                msg.contains("ADMIN_ONLY_OPERATION", ignoreCase = true)
-            ) {
-                Log.w("FirebaseSync", "Firebase Auth not enabled in console, using direct Firestore sync: $msg")
-                isAuthDisabled = true
-            } else {
-                Log.w("FirebaseSync", "Firebase Auth warning: $msg")
-            }
+            val msg = e.localizedMessage ?: e.message ?: ""
+            Log.w("FirebaseSync", "Firebase Auth not active ($msg), using direct Firestore sync")
+            isAuthDisabled = true
             true
         }
     }
@@ -112,27 +165,47 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                     .addSnapshotListener { snapshot, error ->
                         if (error != null) {
                             Log.e("FirebaseSync", "Products listen error: ${error.message}")
+                            _syncDiagnostic.value = parseErrorToDiagnostic(error)
+                            _syncError.value = error.message
                             return@addSnapshotListener
                         }
-                        if (snapshot != null && !snapshot.isEmpty) {
+                        _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+                        if (snapshot != null) {
                             scope.launch {
                                 try {
-                                    for (doc in snapshot.documents) {
-                                        val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                                        val entity = ProductEntity(
-                                            id = id,
-                                            nameArabic = doc.getString("nameArabic") ?: "",
-                                            nameFrench = doc.getString("nameFrench") ?: "",
-                                            category = doc.getString("category") ?: "",
-                                            formatType = doc.getString("formatType") ?: "",
-                                            unit = doc.getString("unit") ?: "نسخة",
-                                            packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 1,
-                                            minimumStock = doc.getLong("minimumStock")?.toInt() ?: 0,
-                                            initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
-                                            notes = doc.getString("notes") ?: "",
-                                            active = doc.getBoolean("active") ?: true
-                                        )
-                                        database.productDao().insertProduct(entity)
+                                    if (snapshot.isEmpty) {
+                                        database.productDao().clearAllProducts()
+                                    } else {
+                                        val remoteIds = mutableSetOf<Long>()
+                                        for (doc in snapshot.documents) {
+                                            val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
+                                            val isActive = doc.getBoolean("active") ?: true
+                                            if (isActive) {
+                                                remoteIds.add(id)
+                                                val entity = ProductEntity(
+                                                    id = id,
+                                                    nameArabic = doc.getString("nameArabic") ?: "",
+                                                    nameFrench = doc.getString("nameFrench") ?: "",
+                                                    category = doc.getString("category") ?: "",
+                                                    formatType = doc.getString("formatType") ?: "",
+                                                    unit = doc.getString("unit") ?: "نسخة",
+                                                    packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 1,
+                                                    minimumStock = doc.getLong("minimumStock")?.toInt() ?: 0,
+                                                    initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
+                                                    notes = doc.getString("notes") ?: "",
+                                                    active = true
+                                                )
+                                                database.productDao().insertProduct(entity)
+                                            } else {
+                                                database.productDao().deleteProductById(id)
+                                            }
+                                        }
+                                        val localProducts = database.productDao().getAllProductsList()
+                                        for (lp in localProducts) {
+                                            if (!remoteIds.contains(lp.id)) {
+                                                database.productDao().deleteProductById(lp.id)
+                                            }
+                                        }
                                     }
                                     _lastSyncTimestamp.value = System.currentTimeMillis()
                                 } catch (e: Exception) {
@@ -148,26 +221,46 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                     .addSnapshotListener { snapshot, error ->
                         if (error != null) {
                             Log.e("FirebaseSync", "Variants listen error: ${error.message}")
+                            _syncDiagnostic.value = parseErrorToDiagnostic(error)
+                            _syncError.value = error.message
                             return@addSnapshotListener
                         }
-                        if (snapshot != null && !snapshot.isEmpty) {
+                        _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+                        if (snapshot != null) {
                             scope.launch {
                                 try {
-                                    for (doc in snapshot.documents) {
-                                        val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                                        val entity = ProductVariantEntity(
-                                            id = id,
-                                            productId = doc.getLong("productId") ?: 0L,
-                                            nameArabic = doc.getString("nameArabic") ?: "",
-                                            nameFrench = doc.getString("nameFrench") ?: "",
-                                            code = doc.getString("code") ?: "",
-                                            initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
-                                            minimumStock = doc.getLong("minimumStock")?.toInt() ?: 20,
-                                            packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 10,
-                                            notes = doc.getString("notes") ?: "",
-                                            active = doc.getBoolean("active") ?: true
-                                        )
-                                        database.productVariantDao().insertVariant(entity)
+                                    if (snapshot.isEmpty) {
+                                        database.productVariantDao().clearAllVariants()
+                                    } else {
+                                        val remoteIds = mutableSetOf<Long>()
+                                        for (doc in snapshot.documents) {
+                                            val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
+                                            val isActive = doc.getBoolean("active") ?: true
+                                            if (isActive) {
+                                                remoteIds.add(id)
+                                                val entity = ProductVariantEntity(
+                                                    id = id,
+                                                    productId = doc.getLong("productId") ?: 0L,
+                                                    nameArabic = doc.getString("nameArabic") ?: "",
+                                                    nameFrench = doc.getString("nameFrench") ?: "",
+                                                    code = doc.getString("code") ?: "",
+                                                    initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
+                                                    minimumStock = doc.getLong("minimumStock")?.toInt() ?: 20,
+                                                    packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 10,
+                                                    notes = doc.getString("notes") ?: "",
+                                                    active = true
+                                                )
+                                                database.productVariantDao().insertVariant(entity)
+                                            } else {
+                                                database.productVariantDao().deleteVariantById(id)
+                                            }
+                                        }
+                                        val localVariants = database.productVariantDao().getAllVariantsList()
+                                        for (lv in localVariants) {
+                                            if (!remoteIds.contains(lv.id)) {
+                                                database.productVariantDao().deleteVariantById(lv.id)
+                                            }
+                                        }
                                     }
                                     _lastSyncTimestamp.value = System.currentTimeMillis()
                                 } catch (e: Exception) {
@@ -183,35 +276,55 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                     .addSnapshotListener { snapshot, error ->
                         if (error != null) {
                             Log.e("FirebaseSync", "Movements listen error: ${error.message}")
+                            _syncDiagnostic.value = parseErrorToDiagnostic(error)
+                            _syncError.value = error.message
                             return@addSnapshotListener
                         }
-                        if (snapshot != null && !snapshot.isEmpty) {
+                        _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+                        if (snapshot != null) {
                             scope.launch {
                                 try {
-                                    for (doc in snapshot.documents) {
-                                        val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                                        val entity = StockMovementEntity(
-                                            id = id,
-                                            productId = doc.getLong("productId") ?: 0L,
-                                            variantId = doc.getLong("variantId"),
-                                            movementType = doc.getString("movementType") ?: "STOCK_IN",
-                                            quantity = doc.getLong("quantity")?.toInt() ?: 0,
-                                            packageCount = doc.getLong("packageCount")?.toInt() ?: 0,
-                                            dateMillis = doc.getLong("dateMillis") ?: System.currentTimeMillis(),
-                                            dateFormatted = doc.getString("dateFormatted") ?: "",
-                                            source = doc.getString("source") ?: "",
-                                            destinationId = doc.getLong("destinationId"),
-                                            destinationName = doc.getString("destinationName") ?: "",
-                                            destinationType = doc.getString("destinationType") ?: "",
-                                            reason = doc.getString("reason") ?: "",
-                                            responsiblePerson = doc.getString("responsiblePerson") ?: "",
-                                            referenceNumber = doc.getString("referenceNumber") ?: "",
-                                            notes = doc.getString("notes") ?: "",
-                                            isReversed = doc.getBoolean("isReversed") ?: false,
-                                            reversedByMovementId = doc.getLong("reversedByMovementId"),
-                                            isDeleted = doc.getBoolean("isDeleted") ?: false
-                                        )
-                                        database.stockMovementDao().insertMovement(entity)
+                                    if (snapshot.isEmpty) {
+                                        database.stockMovementDao().clearAllMovements()
+                                    } else {
+                                        val remoteIds = mutableSetOf<Long>()
+                                        for (doc in snapshot.documents) {
+                                            val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
+                                            val isDel = doc.getBoolean("isDeleted") ?: false
+                                            if (!isDel) {
+                                                remoteIds.add(id)
+                                                val entity = StockMovementEntity(
+                                                    id = id,
+                                                    productId = doc.getLong("productId") ?: 0L,
+                                                    variantId = doc.getLong("variantId"),
+                                                    movementType = doc.getString("movementType") ?: "STOCK_IN",
+                                                    quantity = doc.getLong("quantity")?.toInt() ?: 0,
+                                                    packageCount = doc.getLong("packageCount")?.toInt() ?: 0,
+                                                    dateMillis = doc.getLong("dateMillis") ?: System.currentTimeMillis(),
+                                                    dateFormatted = doc.getString("dateFormatted") ?: "",
+                                                    source = doc.getString("source") ?: "",
+                                                    destinationId = doc.getLong("destinationId"),
+                                                    destinationName = doc.getString("destinationName") ?: "",
+                                                    destinationType = doc.getString("destinationType") ?: "",
+                                                    reason = doc.getString("reason") ?: "",
+                                                    responsiblePerson = doc.getString("responsiblePerson") ?: "",
+                                                    referenceNumber = doc.getString("referenceNumber") ?: "",
+                                                    notes = doc.getString("notes") ?: "",
+                                                    isReversed = doc.getBoolean("isReversed") ?: false,
+                                                    reversedByMovementId = doc.getLong("reversedByMovementId"),
+                                                    isDeleted = false
+                                                )
+                                                database.stockMovementDao().insertMovement(entity)
+                                            } else {
+                                                database.stockMovementDao().deleteMovementById(id)
+                                            }
+                                        }
+                                        val localMovements = database.stockMovementDao().getAllActiveMovementsList()
+                                        for (lm in localMovements) {
+                                            if (!remoteIds.contains(lm.id)) {
+                                                database.stockMovementDao().deleteMovementById(lm.id)
+                                            }
+                                        }
                                     }
                                     _lastSyncTimestamp.value = System.currentTimeMillis()
                                 } catch (e: Exception) {
@@ -227,24 +340,39 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                     .addSnapshotListener { snapshot, error ->
                         if (error != null) {
                             Log.e("FirebaseSync", "Destinations listen error: ${error.message}")
+                            _syncDiagnostic.value = parseErrorToDiagnostic(error)
+                            _syncError.value = error.message
                             return@addSnapshotListener
                         }
-                        if (snapshot != null && !snapshot.isEmpty) {
+                        _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+                        if (snapshot != null) {
                             scope.launch {
                                 try {
-                                    for (doc in snapshot.documents) {
-                                        val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                                        val entity = DestinationEntity(
-                                            id = id,
-                                            name = doc.getString("name") ?: "",
-                                            type = doc.getString("type") ?: "مسجد",
-                                            commune = doc.getString("commune") ?: "",
-                                            province = doc.getString("province") ?: "",
-                                            address = doc.getString("address") ?: "",
-                                            contactPerson = doc.getString("contactPerson") ?: "",
-                                            phone = doc.getString("phone") ?: ""
-                                        )
-                                        database.destinationDao().insertDestination(entity)
+                                    if (snapshot.isEmpty) {
+                                        database.destinationDao().clearAllDestinations()
+                                    } else {
+                                        val remoteIds = mutableSetOf<Long>()
+                                        for (doc in snapshot.documents) {
+                                            val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
+                                            remoteIds.add(id)
+                                            val entity = DestinationEntity(
+                                                id = id,
+                                                name = doc.getString("name") ?: "",
+                                                type = doc.getString("type") ?: "مسجد",
+                                                commune = doc.getString("commune") ?: "",
+                                                province = doc.getString("province") ?: "",
+                                                address = doc.getString("address") ?: "",
+                                                contactPerson = doc.getString("contactPerson") ?: "",
+                                                phone = doc.getString("phone") ?: ""
+                                            )
+                                            database.destinationDao().insertDestination(entity)
+                                        }
+                                        val localDestinations = database.destinationDao().getAllDestinationsList()
+                                        for (ld in localDestinations) {
+                                            if (!remoteIds.contains(ld.id)) {
+                                                database.destinationDao().deleteDestinationById(ld.id)
+                                            }
+                                        }
                                     }
                                     _lastSyncTimestamp.value = System.currentTimeMillis()
                                 } catch (e: Exception) {
@@ -278,94 +406,158 @@ class FirebaseSyncManager(private val database: AppDatabase) {
             // 1. Pull Products
             val prodDocs = firestore.collection("products").get().await()
             val hasRemoteProducts = !prodDocs.isEmpty
-            if (hasRemoteProducts) {
+            if (prodDocs.isEmpty) {
+                database.productDao().clearAllProducts()
+            } else {
+                val remoteIds = mutableSetOf<Long>()
                 for (doc in prodDocs.documents) {
                     val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                    val entity = ProductEntity(
-                        id = id,
-                        nameArabic = doc.getString("nameArabic") ?: "",
-                        nameFrench = doc.getString("nameFrench") ?: "",
-                        category = doc.getString("category") ?: "",
-                        formatType = doc.getString("formatType") ?: "",
-                        unit = doc.getString("unit") ?: "نسخة",
-                        packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 1,
-                        minimumStock = doc.getLong("minimumStock")?.toInt() ?: 0,
-                        initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
-                        notes = doc.getString("notes") ?: "",
-                        active = doc.getBoolean("active") ?: true
-                    )
-                    database.productDao().insertProduct(entity)
+                    val isActive = doc.getBoolean("active") ?: true
+                    if (isActive) {
+                        remoteIds.add(id)
+                        val entity = ProductEntity(
+                            id = id,
+                            nameArabic = doc.getString("nameArabic") ?: "",
+                            nameFrench = doc.getString("nameFrench") ?: "",
+                            category = doc.getString("category") ?: "",
+                            formatType = doc.getString("formatType") ?: "",
+                            unit = doc.getString("unit") ?: "نسخة",
+                            packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 1,
+                            minimumStock = doc.getLong("minimumStock")?.toInt() ?: 0,
+                            initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
+                            notes = doc.getString("notes") ?: "",
+                            active = true
+                        )
+                        database.productDao().insertProduct(entity)
+                    } else {
+                        database.productDao().deleteProductById(id)
+                    }
+                }
+                val localProducts = database.productDao().getAllProductsList()
+                for (lp in localProducts) {
+                    if (!remoteIds.contains(lp.id)) {
+                        database.productDao().deleteProductById(lp.id)
+                    }
                 }
             }
 
             // 2. Pull Variants
             val varDocs = firestore.collection("variants").get().await()
-            for (doc in varDocs.documents) {
-                val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                val entity = ProductVariantEntity(
-                    id = id,
-                    productId = doc.getLong("productId") ?: 0L,
-                    nameArabic = doc.getString("nameArabic") ?: "",
-                    nameFrench = doc.getString("nameFrench") ?: "",
-                    code = doc.getString("code") ?: "",
-                    initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
-                    minimumStock = doc.getLong("minimumStock")?.toInt() ?: 20,
-                    packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 10,
-                    notes = doc.getString("notes") ?: "",
-                    active = doc.getBoolean("active") ?: true
-                )
-                database.productVariantDao().insertVariant(entity)
+            if (varDocs.isEmpty) {
+                database.productVariantDao().clearAllVariants()
+            } else {
+                val remoteIds = mutableSetOf<Long>()
+                for (doc in varDocs.documents) {
+                    val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
+                    val isActive = doc.getBoolean("active") ?: true
+                    if (isActive) {
+                        remoteIds.add(id)
+                        val entity = ProductVariantEntity(
+                            id = id,
+                            productId = doc.getLong("productId") ?: 0L,
+                            nameArabic = doc.getString("nameArabic") ?: "",
+                            nameFrench = doc.getString("nameFrench") ?: "",
+                            code = doc.getString("code") ?: "",
+                            initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
+                            minimumStock = doc.getLong("minimumStock")?.toInt() ?: 20,
+                            packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 10,
+                            notes = doc.getString("notes") ?: "",
+                            active = true
+                        )
+                        database.productVariantDao().insertVariant(entity)
+                    } else {
+                        database.productVariantDao().deleteVariantById(id)
+                    }
+                }
+                val localVariants = database.productVariantDao().getAllVariantsList()
+                for (lv in localVariants) {
+                    if (!remoteIds.contains(lv.id)) {
+                        database.productVariantDao().deleteVariantById(lv.id)
+                    }
+                }
             }
 
             // 3. Pull Movements
             val moveDocs = firestore.collection("movements").get().await()
-            for (doc in moveDocs.documents) {
-                val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                val entity = StockMovementEntity(
-                    id = id,
-                    productId = doc.getLong("productId") ?: 0L,
-                    variantId = doc.getLong("variantId"),
-                    movementType = doc.getString("movementType") ?: "STOCK_IN",
-                    quantity = doc.getLong("quantity")?.toInt() ?: 0,
-                    packageCount = doc.getLong("packageCount")?.toInt() ?: 0,
-                    dateMillis = doc.getLong("dateMillis") ?: System.currentTimeMillis(),
-                    dateFormatted = doc.getString("dateFormatted") ?: "",
-                    source = doc.getString("source") ?: "",
-                    destinationId = doc.getLong("destinationId"),
-                    destinationName = doc.getString("destinationName") ?: "",
-                    destinationType = doc.getString("destinationType") ?: "",
-                    reason = doc.getString("reason") ?: "",
-                    responsiblePerson = doc.getString("responsiblePerson") ?: "",
-                    referenceNumber = doc.getString("referenceNumber") ?: "",
-                    notes = doc.getString("notes") ?: "",
-                    isReversed = doc.getBoolean("isReversed") ?: false,
-                    reversedByMovementId = doc.getLong("reversedByMovementId"),
-                    isDeleted = doc.getBoolean("isDeleted") ?: false
-                )
-                database.stockMovementDao().insertMovement(entity)
+            if (moveDocs.isEmpty) {
+                database.stockMovementDao().clearAllMovements()
+            } else {
+                val remoteIds = mutableSetOf<Long>()
+                for (doc in moveDocs.documents) {
+                    val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
+                    val isDel = doc.getBoolean("isDeleted") ?: false
+                    if (!isDel) {
+                        remoteIds.add(id)
+                        val entity = StockMovementEntity(
+                            id = id,
+                            productId = doc.getLong("productId") ?: 0L,
+                            variantId = doc.getLong("variantId"),
+                            movementType = doc.getString("movementType") ?: "STOCK_IN",
+                            quantity = doc.getLong("quantity")?.toInt() ?: 0,
+                            packageCount = doc.getLong("packageCount")?.toInt() ?: 0,
+                            dateMillis = doc.getLong("dateMillis") ?: System.currentTimeMillis(),
+                            dateFormatted = doc.getString("dateFormatted") ?: "",
+                            source = doc.getString("source") ?: "",
+                            destinationId = doc.getLong("destinationId"),
+                            destinationName = doc.getString("destinationName") ?: "",
+                            destinationType = doc.getString("destinationType") ?: "",
+                            reason = doc.getString("reason") ?: "",
+                            responsiblePerson = doc.getString("responsiblePerson") ?: "",
+                            referenceNumber = doc.getString("referenceNumber") ?: "",
+                            notes = doc.getString("notes") ?: "",
+                            isReversed = doc.getBoolean("isReversed") ?: false,
+                            reversedByMovementId = doc.getLong("reversedByMovementId"),
+                            isDeleted = false
+                        )
+                        database.stockMovementDao().insertMovement(entity)
+                    } else {
+                        database.stockMovementDao().deleteMovementById(id)
+                    }
+                }
+                val localMovements = database.stockMovementDao().getAllActiveMovementsList()
+                for (lm in localMovements) {
+                    if (!remoteIds.contains(lm.id)) {
+                        database.stockMovementDao().deleteMovementById(lm.id)
+                    }
+                }
             }
 
             // 4. Pull Destinations
             val destDocs = firestore.collection("destinations").get().await()
-            for (doc in destDocs.documents) {
-                val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                val entity = DestinationEntity(
-                    id = id,
-                    name = doc.getString("name") ?: "",
-                    type = doc.getString("type") ?: "مسجد",
-                    commune = doc.getString("commune") ?: "",
-                    province = doc.getString("province") ?: "",
-                    address = doc.getString("address") ?: "",
-                    contactPerson = doc.getString("contactPerson") ?: "",
-                    phone = doc.getString("phone") ?: ""
-                )
-                database.destinationDao().insertDestination(entity)
+            if (destDocs.isEmpty) {
+                database.destinationDao().clearAllDestinations()
+            } else {
+                val remoteIds = mutableSetOf<Long>()
+                for (doc in destDocs.documents) {
+                    val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
+                    remoteIds.add(id)
+                    val entity = DestinationEntity(
+                        id = id,
+                        name = doc.getString("name") ?: "",
+                        type = doc.getString("type") ?: "مسجد",
+                        commune = doc.getString("commune") ?: "",
+                        province = doc.getString("province") ?: "",
+                        address = doc.getString("address") ?: "",
+                        contactPerson = doc.getString("contactPerson") ?: "",
+                        phone = doc.getString("phone") ?: ""
+                    )
+                    database.destinationDao().insertDestination(entity)
+                }
+                val localDestinations = database.destinationDao().getAllDestinationsList()
+                for (ld in localDestinations) {
+                    if (!remoteIds.contains(ld.id)) {
+                        database.destinationDao().deleteDestinationById(ld.id)
+                    }
+                }
             }
 
             _lastSyncTimestamp.value = System.currentTimeMillis()
+            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
             hasRemoteProducts
         } catch (e: Exception) {
-            _syncError.value = e.localizedMessage
+            val diag = parseErrorToDiagnostic(e)
+            _syncDiagnostic.value = diag
+            _syncError.value = e.localizedMessage ?: e.message
             Log.e("FirebaseSync", "pullAllFromCloud error", e)
             false
         } finally {
@@ -392,7 +584,11 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 "updatedAt" to System.currentTimeMillis()
             )
             firestore.collection("products").document(product.id.toString()).set(data, SetOptions.merge()).await()
+            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
         } catch (e: Exception) {
+            val diag = parseErrorToDiagnostic(e)
+            _syncDiagnostic.value = diag
+            _syncError.value = e.localizedMessage ?: e.message
             Log.e("FirebaseSync", "Push product failed", e)
         }
     }
@@ -402,6 +598,9 @@ class FirebaseSyncManager(private val database: AppDatabase) {
             ensureAuth()
             firestore.collection("products").document(productId.toString()).update("active", false, "updatedAt", System.currentTimeMillis()).await()
         } catch (e: Exception) {
+            val diag = parseErrorToDiagnostic(e)
+            _syncDiagnostic.value = diag
+            _syncError.value = e.localizedMessage ?: e.message
             Log.e("FirebaseSync", "Delete product in Firestore failed", e)
         }
     }
@@ -423,7 +622,11 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 "updatedAt" to System.currentTimeMillis()
             )
             firestore.collection("variants").document(variant.id.toString()).set(data, SetOptions.merge()).await()
+            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
         } catch (e: Exception) {
+            val diag = parseErrorToDiagnostic(e)
+            _syncDiagnostic.value = diag
+            _syncError.value = e.localizedMessage ?: e.message
             Log.e("FirebaseSync", "Push variant failed", e)
         }
     }
@@ -433,6 +636,9 @@ class FirebaseSyncManager(private val database: AppDatabase) {
             ensureAuth()
             firestore.collection("variants").document(variantId.toString()).update("active", false, "updatedAt", System.currentTimeMillis()).await()
         } catch (e: Exception) {
+            val diag = parseErrorToDiagnostic(e)
+            _syncDiagnostic.value = diag
+            _syncError.value = e.localizedMessage ?: e.message
             Log.e("FirebaseSync", "Delete variant in Firestore failed", e)
         }
     }
@@ -463,7 +669,11 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 "updatedAt" to System.currentTimeMillis()
             )
             firestore.collection("movements").document(movement.id.toString()).set(data, SetOptions.merge()).await()
+            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
         } catch (e: Exception) {
+            val diag = parseErrorToDiagnostic(e)
+            _syncDiagnostic.value = diag
+            _syncError.value = e.localizedMessage ?: e.message
             Log.e("FirebaseSync", "Push movement failed", e)
         }
     }
@@ -483,7 +693,11 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 "updatedAt" to System.currentTimeMillis()
             )
             firestore.collection("destinations").document(destination.id.toString()).set(data, SetOptions.merge()).await()
+            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
         } catch (e: Exception) {
+            val diag = parseErrorToDiagnostic(e)
+            _syncDiagnostic.value = diag
+            _syncError.value = e.localizedMessage ?: e.message
             Log.e("FirebaseSync", "Push destination failed", e)
         }
     }
@@ -535,6 +749,9 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 pushDestination(d)
             }
         } catch (e: Exception) {
+            val diag = parseErrorToDiagnostic(e)
+            _syncDiagnostic.value = diag
+            _syncError.value = e.localizedMessage ?: e.message
             Log.e("FirebaseSync", "pushAllToCloud error", e)
         }
     }
@@ -559,8 +776,12 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 doc.reference.delete().await()
             }
             _lastSyncTimestamp.value = System.currentTimeMillis()
+            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
             Log.d("FirebaseSync", "All cloud data cleared successfully")
         } catch (e: Exception) {
+            val diag = parseErrorToDiagnostic(e)
+            _syncDiagnostic.value = diag
+            _syncError.value = e.localizedMessage ?: e.message
             Log.e("FirebaseSync", "clearAllCloudData error", e)
         }
     }
@@ -571,13 +792,22 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         try {
             ensureAuth()
             // 1. Pull latest changes from Firestore
-            pullAllFromCloud()
+            val pullOk = pullAllFromCloud()
+            if (!pullOk && _syncDiagnostic.value !is CloudSyncDiagnostic.Connected && _syncDiagnostic.value !is CloudSyncDiagnostic.Idle) {
+                return@withContext false
+            }
             // 2. Push any local changes to Firestore
             pushAllToCloud()
+            if (_syncDiagnostic.value !is CloudSyncDiagnostic.Connected && _syncDiagnostic.value !is CloudSyncDiagnostic.Idle) {
+                return@withContext false
+            }
             _lastSyncTimestamp.value = System.currentTimeMillis()
+            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
             true
         } catch (e: Exception) {
-            _syncError.value = e.localizedMessage
+            val diag = parseErrorToDiagnostic(e)
+            _syncDiagnostic.value = diag
+            _syncError.value = e.localizedMessage ?: e.message
             Log.e("FirebaseSync", "fullBidirectionalSync error", e)
             false
         } finally {

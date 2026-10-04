@@ -18,6 +18,7 @@ import com.example.data.model.StockCalculator
 import com.example.data.model.StockHistoryPoint
 import com.example.data.model.UserProfile
 import com.example.data.repository.StockRepository
+import com.example.data.sync.CloudSyncDiagnostic
 import com.example.utils.BackupHelper
 import com.example.utils.ExcelImportHelper
 import com.example.utils.ImportRowRaw
@@ -314,15 +315,54 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
         showMessage("تم حفظ وتحديث بيانات الحساب بنجاح")
     }
 
+    // Cloud Sync Diagnostics & State
+    val syncDiagnostic: StateFlow<CloudSyncDiagnostic> = repository.syncManager.syncDiagnostic
+    val syncError: StateFlow<String?> = repository.syncManager.syncError
+    val lastSyncTimestamp: StateFlow<Long?> = repository.syncManager.lastSyncTimestamp
+
+    fun checkCloudConnection() {
+        viewModelScope.launch {
+            _cloudSyncState.value = CloudSyncState.SYNCING
+            val diag = repository.syncManager.diagnoseConnection()
+            _cloudSyncState.value = CloudSyncState.IDLE_SYNCED
+            when (diag) {
+                is CloudSyncDiagnostic.Connected -> {
+                    showMessage("تم الاتصال بقاعدة بيانات Firestore السحابية بنجاح.")
+                }
+                is CloudSyncDiagnostic.DatabaseNotFound -> {
+                    showMessage("تنبيه: قاعدة بيانات Firestore محذوفة في Firebase Console. يرجى إنشاء قاعدة البيانات (default).")
+                }
+                is CloudSyncDiagnostic.PermissionDenied -> {
+                    showMessage("تنبيه: تم رفض إذن الوصول لقاعدة بيانات Firestore. تحقق من قواعد الأمان Rules.")
+                }
+                is CloudSyncDiagnostic.NetworkError -> {
+                    showMessage("تعذر الاتصال بالسحابة: تحقق من اتصال الإنترنت.")
+                }
+                else -> {
+                    val err = repository.syncManager.syncError.value ?: "خطأ في الاتصال"
+                    showMessage("فحص الاتصال: $err")
+                }
+            }
+        }
+    }
+
     fun triggerSyncNow() {
         viewModelScope.launch {
             _cloudSyncState.value = CloudSyncState.SYNCING
             val success = repository.syncManager.fullBidirectionalSync()
             _cloudSyncState.value = CloudSyncState.IDLE_SYNCED
             if (success) {
-                showMessage("تمت المزامنة السحابية وتحديث بيانات المخزون عبر الأجهزة بنجاح")
+                showMessage("تمت المزامنة السحابية وتحديث بيانات المخزون بنجاح")
             } else {
-                showMessage("تم تحديث ومزامنة البيانات مع السحابة")
+                val diag = repository.syncManager.syncDiagnostic.value
+                val err = repository.syncManager.syncError.value
+                val errorMsg = when (diag) {
+                    is CloudSyncDiagnostic.DatabaseNotFound -> "فشلت المزامنة: قاعدة بيانات Firestore محذوفة أو غير مفعلة في مشروع Firebase."
+                    is CloudSyncDiagnostic.PermissionDenied -> "فشلت المزامنة: تم رفض الإذن من قواعد حماية Firestore."
+                    is CloudSyncDiagnostic.NetworkError -> "فشلت المزامنة: لا يوجد اتصال بالإنترنت."
+                    else -> "فشلت المزامنة: ${err ?: "يرجى التحقق من إنشاء قاعدة البيانات في Firebase Console"}"
+                }
+                showMessage(errorMsg)
             }
         }
     }
