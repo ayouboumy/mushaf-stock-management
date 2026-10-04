@@ -363,7 +363,9 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
             val success = repository.syncManager.fullBidirectionalSync()
             _cloudSyncState.value = CloudSyncState.IDLE_SYNCED
             if (success) {
-                showMessage("تمت المزامنة السحابية وتحديث بيانات المخزون بنجاح")
+                val pCount = database.productDao().getActiveProductsList().size
+                val mCount = database.stockMovementDao().getAllActiveMovementsList().size
+                showMessage("تمت المزامنة السحابية بنجاح ($pCount أصناف، $mCount حركات مخزنية)")
             } else {
                 val diag = repository.syncManager.syncDiagnostic.value
                 val err = repository.syncManager.syncError.value

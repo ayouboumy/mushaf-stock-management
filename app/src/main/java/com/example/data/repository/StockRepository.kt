@@ -33,6 +33,7 @@ class StockRepository(private val database: AppDatabase) {
 
     init {
         syncManager.startRealtimeListeners()
+        syncManager.startAutoSync()
     }
 
     val allProducts: Flow<List<ProductEntity>> = productDao.getActiveProducts()

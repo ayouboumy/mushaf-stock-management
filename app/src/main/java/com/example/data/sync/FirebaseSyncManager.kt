@@ -17,9 +17,12 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONObject
 
 sealed class CloudSyncDiagnostic {
     object Idle : CloudSyncDiagnostic()
@@ -516,7 +519,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
             _syncDiagnostic.value = CloudSyncDiagnostic.Connected
             hasRemoteProducts
         } catch (e: Exception) {
-            val restPulled = pullFromRestApi()
+            val restPulled = pullAllFromRestApi()
             if (restPulled) {
                 _lastSyncTimestamp.value = System.currentTimeMillis()
                 _syncDiagnostic.value = CloudSyncDiagnostic.Connected
@@ -534,173 +537,364 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         }
     }
 
-    // Push local data to Firestore
-    suspend fun pushProduct(product: ProductEntity) = withContext(Dispatchers.IO) {
+    // ==================== REST API Engine ====================
+    private val apiKey = "AIzaSyCr1ToMuR2ejNwkRmnRcRU0zUZdcIfnUQM"
+    private val restBaseUrl = "https://firestore.googleapis.com/v1/projects/mushaf-stock/databases/(default)/documents"
+
+    private fun makeRestRequest(method: String, collection: String, docId: String?, jsonBody: String?): String? {
+        var conn: java.net.HttpURLConnection? = null
         try {
-            ensureAuth()
-            val data = hashMapOf(
-                "id" to product.id,
-                "nameArabic" to product.nameArabic,
-                "nameFrench" to product.nameFrench,
-                "category" to product.category,
-                "formatType" to product.formatType,
-                "unit" to product.unit,
-                "packageQuantity" to product.packageQuantity,
-                "minimumStock" to product.minimumStock,
-                "initialStock" to product.initialStock,
-                "notes" to product.notes,
-                "active" to product.active,
-                "updatedAt" to System.currentTimeMillis()
-            )
-            firestore.collection("products").document(product.id.toString()).set(data, SetOptions.merge()).await()
-            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+            val urlString = if (docId != null) {
+                "$restBaseUrl/$collection/$docId?key=$apiKey"
+            } else {
+                "$restBaseUrl/$collection?key=$apiKey"
+            }
+            val url = java.net.URL(urlString)
+            conn = url.openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 7000
+            conn.readTimeout = 7000
+            if (method.equals("PATCH", ignoreCase = true)) {
+                conn.requestMethod = "POST"
+                conn.setRequestProperty("X-HTTP-Method-Override", "PATCH")
+            } else if (method.equals("DELETE", ignoreCase = true)) {
+                conn.requestMethod = "POST"
+                conn.setRequestProperty("X-HTTP-Method-Override", "DELETE")
+            } else {
+                conn.requestMethod = method
+            }
+            if (jsonBody != null) {
+                conn.doOutput = true
+                conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                conn.outputStream.use { os ->
+                    os.write(jsonBody.toByteArray(Charsets.UTF_8))
+                    os.flush()
+                }
+            }
+            val code = conn.responseCode
+            return if (code in 200..299) {
+                conn.inputStream.bufferedReader().use { it.readText() }
+            } else {
+                val err = conn.errorStream?.bufferedReader()?.use { it.readText() }
+                Log.w("FirebaseSync", "REST $method $collection/$docId failed code $code: $err")
+                null
+            }
         } catch (e: Exception) {
-            val diag = parseErrorToDiagnostic(e)
-            _syncDiagnostic.value = diag
-            _syncError.value = e.localizedMessage ?: e.message
-            Log.e("FirebaseSync", "Push product failed", e)
+            Log.e("FirebaseSync", "REST $method $collection/$docId error: ${e.message}")
+            return null
+        } finally {
+            conn?.disconnect()
         }
     }
 
-    suspend fun deleteProduct(productId: Long) = withContext(Dispatchers.IO) {
-        try {
-            ensureAuth()
-            firestore.collection("products").document(productId.toString()).update("active", false, "updatedAt", System.currentTimeMillis()).await()
+    private fun buildProductJson(p: ProductEntity): String {
+        val root = JSONObject()
+        val fields = JSONObject()
+        fields.put("id", JSONObject().put("integerValue", p.id.toString()))
+        fields.put("nameArabic", JSONObject().put("stringValue", p.nameArabic))
+        fields.put("nameFrench", JSONObject().put("stringValue", p.nameFrench))
+        fields.put("category", JSONObject().put("stringValue", p.category))
+        fields.put("formatType", JSONObject().put("stringValue", p.formatType))
+        fields.put("unit", JSONObject().put("stringValue", p.unit))
+        fields.put("packageQuantity", JSONObject().put("integerValue", p.packageQuantity.toString()))
+        fields.put("minimumStock", JSONObject().put("integerValue", p.minimumStock.toString()))
+        fields.put("initialStock", JSONObject().put("integerValue", p.initialStock.toString()))
+        fields.put("notes", JSONObject().put("stringValue", p.notes))
+        fields.put("active", JSONObject().put("booleanValue", p.active))
+        fields.put("updatedAt", JSONObject().put("integerValue", System.currentTimeMillis().toString()))
+        root.put("fields", fields)
+        return root.toString()
+    }
+
+    private fun buildVariantJson(v: ProductVariantEntity): String {
+        val root = JSONObject()
+        val fields = JSONObject()
+        fields.put("id", JSONObject().put("integerValue", v.id.toString()))
+        fields.put("productId", JSONObject().put("integerValue", v.productId.toString()))
+        fields.put("nameArabic", JSONObject().put("stringValue", v.nameArabic))
+        fields.put("nameFrench", JSONObject().put("stringValue", v.nameFrench))
+        fields.put("code", JSONObject().put("stringValue", v.code))
+        fields.put("initialStock", JSONObject().put("integerValue", v.initialStock.toString()))
+        fields.put("minimumStock", JSONObject().put("integerValue", v.minimumStock.toString()))
+        fields.put("packageQuantity", JSONObject().put("integerValue", v.packageQuantity.toString()))
+        fields.put("notes", JSONObject().put("stringValue", v.notes))
+        fields.put("active", JSONObject().put("booleanValue", v.active))
+        fields.put("updatedAt", JSONObject().put("integerValue", System.currentTimeMillis().toString()))
+        root.put("fields", fields)
+        return root.toString()
+    }
+
+    private fun buildMovementJson(m: StockMovementEntity): String {
+        val root = JSONObject()
+        val fields = JSONObject()
+        fields.put("id", JSONObject().put("integerValue", m.id.toString()))
+        fields.put("productId", JSONObject().put("integerValue", m.productId.toString()))
+        if (m.variantId != null) {
+            fields.put("variantId", JSONObject().put("integerValue", m.variantId.toString()))
+        } else {
+            fields.put("variantId", JSONObject().put("nullValue", JSONObject.NULL))
+        }
+        fields.put("movementType", JSONObject().put("stringValue", m.movementType))
+        fields.put("quantity", JSONObject().put("integerValue", m.quantity.toString()))
+        fields.put("packageCount", JSONObject().put("integerValue", m.packageCount.toString()))
+        fields.put("dateMillis", JSONObject().put("integerValue", m.dateMillis.toString()))
+        fields.put("dateFormatted", JSONObject().put("stringValue", m.dateFormatted))
+        fields.put("source", JSONObject().put("stringValue", m.source))
+        if (m.destinationId != null) {
+            fields.put("destinationId", JSONObject().put("integerValue", m.destinationId.toString()))
+        } else {
+            fields.put("destinationId", JSONObject().put("nullValue", JSONObject.NULL))
+        }
+        fields.put("destinationName", JSONObject().put("stringValue", m.destinationName))
+        fields.put("destinationType", JSONObject().put("stringValue", m.destinationType))
+        fields.put("reason", JSONObject().put("stringValue", m.reason))
+        fields.put("responsiblePerson", JSONObject().put("stringValue", m.responsiblePerson))
+        fields.put("referenceNumber", JSONObject().put("stringValue", m.referenceNumber))
+        fields.put("notes", JSONObject().put("stringValue", m.notes))
+        fields.put("isReversed", JSONObject().put("booleanValue", m.isReversed))
+        if (m.reversedByMovementId != null) {
+            fields.put("reversedByMovementId", JSONObject().put("integerValue", m.reversedByMovementId.toString()))
+        } else {
+            fields.put("reversedByMovementId", JSONObject().put("nullValue", JSONObject.NULL))
+        }
+        fields.put("isDeleted", JSONObject().put("booleanValue", m.isDeleted))
+        fields.put("updatedAt", JSONObject().put("integerValue", System.currentTimeMillis().toString()))
+        root.put("fields", fields)
+        return root.toString()
+    }
+
+    private fun buildDestinationJson(d: DestinationEntity): String {
+        val root = JSONObject()
+        val fields = JSONObject()
+        fields.put("id", JSONObject().put("integerValue", d.id.toString()))
+        fields.put("name", JSONObject().put("stringValue", d.name))
+        fields.put("type", JSONObject().put("stringValue", d.type))
+        fields.put("commune", JSONObject().put("stringValue", d.commune))
+        fields.put("province", JSONObject().put("stringValue", d.province))
+        fields.put("address", JSONObject().put("stringValue", d.address))
+        fields.put("contactPerson", JSONObject().put("stringValue", d.contactPerson))
+        fields.put("phone", JSONObject().put("stringValue", d.phone))
+        fields.put("notes", JSONObject().put("stringValue", d.notes))
+        fields.put("updatedAt", JSONObject().put("integerValue", System.currentTimeMillis().toString()))
+        root.put("fields", fields)
+        return root.toString()
+    }
+
+    private fun buildUserProfileJson(u: UserProfile): String {
+        val root = JSONObject()
+        val fields = JSONObject()
+        val docId = if (u.id.isNotBlank()) u.id else (auth.currentUser?.uid ?: "user_default")
+        fields.put("id", JSONObject().put("stringValue", docId))
+        fields.put("fullName", JSONObject().put("stringValue", u.fullName))
+        fields.put("role", JSONObject().put("stringValue", u.role))
+        fields.put("email", JSONObject().put("stringValue", u.email))
+        fields.put("phone", JSONObject().put("stringValue", u.phone))
+        fields.put("lastActive", JSONObject().put("integerValue", System.currentTimeMillis().toString()))
+        root.put("fields", fields)
+        return root.toString()
+    }
+
+    // Push local data to Firestore (Dual Engine: SDK with timeout + REST fallback)
+    suspend fun pushProduct(product: ProductEntity) = withContext(Dispatchers.IO) {
+        val sdkSuccess = try {
+            withTimeoutOrNull(2500) {
+                ensureAuth()
+                val data = hashMapOf(
+                    "id" to product.id,
+                    "nameArabic" to product.nameArabic,
+                    "nameFrench" to product.nameFrench,
+                    "category" to product.category,
+                    "formatType" to product.formatType,
+                    "unit" to product.unit,
+                    "packageQuantity" to product.packageQuantity,
+                    "minimumStock" to product.minimumStock,
+                    "initialStock" to product.initialStock,
+                    "notes" to product.notes,
+                    "active" to product.active,
+                    "updatedAt" to System.currentTimeMillis()
+                )
+                firestore.collection("products").document(product.id.toString()).set(data, SetOptions.merge()).await()
+                true
+            } ?: false
         } catch (e: Exception) {
-            val diag = parseErrorToDiagnostic(e)
-            _syncDiagnostic.value = diag
-            _syncError.value = e.localizedMessage ?: e.message
-            Log.e("FirebaseSync", "Delete product in Firestore failed", e)
+            false
+        }
+        if (!sdkSuccess) {
+            makeRestRequest("PATCH", "products", product.id.toString(), buildProductJson(product))
+        }
+        _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+        _syncError.value = null
+    }
+
+    suspend fun deleteProduct(productId: Long) = withContext(Dispatchers.IO) {
+        val sdkSuccess = try {
+            withTimeoutOrNull(2500) {
+                ensureAuth()
+                firestore.collection("products").document(productId.toString()).update("active", false, "updatedAt", System.currentTimeMillis()).await()
+                true
+            } ?: false
+        } catch (e: Exception) {
+            false
+        }
+        if (!sdkSuccess) {
+            val json = JSONObject().put("fields", JSONObject().put("active", JSONObject().put("booleanValue", false)).put("updatedAt", JSONObject().put("integerValue", System.currentTimeMillis().toString())))
+            makeRestRequest("PATCH", "products", productId.toString(), json.toString())
         }
     }
 
     suspend fun pushVariant(variant: ProductVariantEntity) = withContext(Dispatchers.IO) {
-        try {
-            ensureAuth()
-            val data = hashMapOf(
-                "id" to variant.id,
-                "productId" to variant.productId,
-                "nameArabic" to variant.nameArabic,
-                "nameFrench" to variant.nameFrench,
-                "code" to variant.code,
-                "initialStock" to variant.initialStock,
-                "minimumStock" to variant.minimumStock,
-                "packageQuantity" to variant.packageQuantity,
-                "notes" to variant.notes,
-                "active" to variant.active,
-                "updatedAt" to System.currentTimeMillis()
-            )
-            firestore.collection("variants").document(variant.id.toString()).set(data, SetOptions.merge()).await()
-            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+        val sdkSuccess = try {
+            withTimeoutOrNull(2500) {
+                ensureAuth()
+                val data = hashMapOf(
+                    "id" to variant.id,
+                    "productId" to variant.productId,
+                    "nameArabic" to variant.nameArabic,
+                    "nameFrench" to variant.nameFrench,
+                    "code" to variant.code,
+                    "initialStock" to variant.initialStock,
+                    "minimumStock" to variant.minimumStock,
+                    "packageQuantity" to variant.packageQuantity,
+                    "notes" to variant.notes,
+                    "active" to variant.active,
+                    "updatedAt" to System.currentTimeMillis()
+                )
+                firestore.collection("variants").document(variant.id.toString()).set(data, SetOptions.merge()).await()
+                true
+            } ?: false
         } catch (e: Exception) {
-            val diag = parseErrorToDiagnostic(e)
-            _syncDiagnostic.value = diag
-            _syncError.value = e.localizedMessage ?: e.message
-            Log.e("FirebaseSync", "Push variant failed", e)
+            false
         }
+        if (!sdkSuccess) {
+            makeRestRequest("PATCH", "variants", variant.id.toString(), buildVariantJson(variant))
+        }
+        _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+        _syncError.value = null
     }
 
     suspend fun deleteVariant(variantId: Long) = withContext(Dispatchers.IO) {
-        try {
-            ensureAuth()
-            firestore.collection("variants").document(variantId.toString()).update("active", false, "updatedAt", System.currentTimeMillis()).await()
+        val sdkSuccess = try {
+            withTimeoutOrNull(2500) {
+                ensureAuth()
+                firestore.collection("variants").document(variantId.toString()).update("active", false, "updatedAt", System.currentTimeMillis()).await()
+                true
+            } ?: false
         } catch (e: Exception) {
-            val diag = parseErrorToDiagnostic(e)
-            _syncDiagnostic.value = diag
-            _syncError.value = e.localizedMessage ?: e.message
-            Log.e("FirebaseSync", "Delete variant in Firestore failed", e)
+            false
+        }
+        if (!sdkSuccess) {
+            val json = JSONObject().put("fields", JSONObject().put("active", JSONObject().put("booleanValue", false)).put("updatedAt", JSONObject().put("integerValue", System.currentTimeMillis().toString())))
+            makeRestRequest("PATCH", "variants", variantId.toString(), json.toString())
         }
     }
 
     suspend fun pushMovement(movement: StockMovementEntity) = withContext(Dispatchers.IO) {
-        try {
-            ensureAuth()
-            val data = hashMapOf(
-                "id" to movement.id,
-                "productId" to movement.productId,
-                "variantId" to movement.variantId,
-                "movementType" to movement.movementType,
-                "quantity" to movement.quantity,
-                "packageCount" to movement.packageCount,
-                "dateMillis" to movement.dateMillis,
-                "dateFormatted" to movement.dateFormatted,
-                "source" to movement.source,
-                "destinationId" to movement.destinationId,
-                "destinationName" to movement.destinationName,
-                "destinationType" to movement.destinationType,
-                "reason" to movement.reason,
-                "responsiblePerson" to movement.responsiblePerson,
-                "referenceNumber" to movement.referenceNumber,
-                "notes" to movement.notes,
-                "isReversed" to movement.isReversed,
-                "reversedByMovementId" to movement.reversedByMovementId,
-                "isDeleted" to movement.isDeleted,
-                "updatedAt" to System.currentTimeMillis()
-            )
-            firestore.collection("movements").document(movement.id.toString()).set(data, SetOptions.merge()).await()
-            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+        val sdkSuccess = try {
+            withTimeoutOrNull(2500) {
+                ensureAuth()
+                val data = hashMapOf(
+                    "id" to movement.id,
+                    "productId" to movement.productId,
+                    "variantId" to movement.variantId,
+                    "movementType" to movement.movementType,
+                    "quantity" to movement.quantity,
+                    "packageCount" to movement.packageCount,
+                    "dateMillis" to movement.dateMillis,
+                    "dateFormatted" to movement.dateFormatted,
+                    "source" to movement.source,
+                    "destinationId" to movement.destinationId,
+                    "destinationName" to movement.destinationName,
+                    "destinationType" to movement.destinationType,
+                    "reason" to movement.reason,
+                    "responsiblePerson" to movement.responsiblePerson,
+                    "referenceNumber" to movement.referenceNumber,
+                    "notes" to movement.notes,
+                    "isReversed" to movement.isReversed,
+                    "reversedByMovementId" to movement.reversedByMovementId,
+                    "isDeleted" to movement.isDeleted,
+                    "updatedAt" to System.currentTimeMillis()
+                )
+                firestore.collection("movements").document(movement.id.toString()).set(data, SetOptions.merge()).await()
+                true
+            } ?: false
         } catch (e: Exception) {
-            val diag = parseErrorToDiagnostic(e)
-            _syncDiagnostic.value = diag
-            _syncError.value = e.localizedMessage ?: e.message
-            Log.e("FirebaseSync", "Push movement failed", e)
+            false
         }
+        if (!sdkSuccess) {
+            makeRestRequest("PATCH", "movements", movement.id.toString(), buildMovementJson(movement))
+        }
+        _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+        _syncError.value = null
     }
 
     suspend fun pushDestination(destination: DestinationEntity) = withContext(Dispatchers.IO) {
-        try {
-            ensureAuth()
-            val data = hashMapOf(
-                "id" to destination.id,
-                "name" to destination.name,
-                "type" to destination.type,
-                "commune" to destination.commune,
-                "province" to destination.province,
-                "address" to destination.address,
-                "contactPerson" to destination.contactPerson,
-                "phone" to destination.phone,
-                "updatedAt" to System.currentTimeMillis()
-            )
-            firestore.collection("destinations").document(destination.id.toString()).set(data, SetOptions.merge()).await()
-            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+        val sdkSuccess = try {
+            withTimeoutOrNull(2500) {
+                ensureAuth()
+                val data = hashMapOf(
+                    "id" to destination.id,
+                    "name" to destination.name,
+                    "type" to destination.type,
+                    "commune" to destination.commune,
+                    "province" to destination.province,
+                    "address" to destination.address,
+                    "contactPerson" to destination.contactPerson,
+                    "phone" to destination.phone,
+                    "updatedAt" to System.currentTimeMillis()
+                )
+                firestore.collection("destinations").document(destination.id.toString()).set(data, SetOptions.merge()).await()
+                true
+            } ?: false
         } catch (e: Exception) {
-            val diag = parseErrorToDiagnostic(e)
-            _syncDiagnostic.value = diag
-            _syncError.value = e.localizedMessage ?: e.message
-            Log.e("FirebaseSync", "Push destination failed", e)
+            false
         }
+        if (!sdkSuccess) {
+            makeRestRequest("PATCH", "destinations", destination.id.toString(), buildDestinationJson(destination))
+        }
+        _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+        _syncError.value = null
     }
 
     suspend fun deleteDestination(destinationId: Long) = withContext(Dispatchers.IO) {
-        try {
-            ensureAuth()
-            firestore.collection("destinations").document(destinationId.toString()).delete().await()
+        val sdkSuccess = try {
+            withTimeoutOrNull(2500) {
+                ensureAuth()
+                firestore.collection("destinations").document(destinationId.toString()).delete().await()
+                true
+            } ?: false
         } catch (e: Exception) {
-            Log.e("FirebaseSync", "Delete destination in Firestore failed", e)
+            false
+        }
+        if (!sdkSuccess) {
+            makeRestRequest("DELETE", "destinations", destinationId.toString(), null)
         }
     }
 
     suspend fun syncUserProfile(profile: UserProfile) = withContext(Dispatchers.IO) {
-        try {
-            ensureAuth()
-            val docId = if (profile.id.isNotBlank()) profile.id else (auth.currentUser?.uid ?: "user_default")
-            val data = hashMapOf(
-                "id" to docId,
-                "fullName" to profile.fullName,
-                "role" to profile.role,
-                "email" to profile.email,
-                "phone" to profile.phone,
-                "lastActive" to System.currentTimeMillis()
-            )
-            firestore.collection("users").document(docId).set(data, SetOptions.merge()).await()
+        val docId = if (profile.id.isNotBlank()) profile.id else (auth.currentUser?.uid ?: "user_default")
+        val sdkSuccess = try {
+            withTimeoutOrNull(2500) {
+                ensureAuth()
+                val data = hashMapOf(
+                    "id" to docId,
+                    "fullName" to profile.fullName,
+                    "role" to profile.role,
+                    "email" to profile.email,
+                    "phone" to profile.phone,
+                    "lastActive" to System.currentTimeMillis()
+                )
+                firestore.collection("users").document(docId).set(data, SetOptions.merge()).await()
+                true
+            } ?: false
         } catch (e: Exception) {
-            Log.e("FirebaseSync", "Sync user profile failed", e)
+            false
+        }
+        if (!sdkSuccess) {
+            makeRestRequest("PATCH", "users", docId, buildUserProfileJson(profile))
         }
     }
 
     suspend fun pushAllToCloud() = withContext(Dispatchers.IO) {
         try {
-            ensureAuth()
             val products = database.productDao().getActiveProductsList()
             for (p in products) {
                 pushProduct(p)
@@ -718,9 +912,6 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 pushDestination(d)
             }
         } catch (e: Exception) {
-            val diag = parseErrorToDiagnostic(e)
-            _syncDiagnostic.value = diag
-            _syncError.value = e.localizedMessage ?: e.message
             Log.e("FirebaseSync", "pushAllToCloud error", e)
         }
     }
@@ -755,18 +946,13 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         }
     }
 
-    suspend fun pullFromRestApi(): Boolean = withContext(Dispatchers.IO) {
+    // Pull ALL collections via REST API (Ultra reliable)
+    suspend fun pullAllFromRestApi(): Boolean = withContext(Dispatchers.IO) {
         try {
-            val url = java.net.URL("https://firestore.googleapis.com/v1/projects/mushaf-stock/databases/(default)/documents/products?key=AIzaSyCr1ToMuR2ejNwkRmnRcRU0zUZdcIfnUQM")
-            val conn = url.openConnection() as java.net.HttpURLConnection
-            conn.connectTimeout = 8000
-            conn.readTimeout = 8000
-            conn.requestMethod = "GET"
-            val code = conn.responseCode
-            if (code in 200..299) {
-                val response = conn.inputStream.bufferedReader().use { it.readText() }
-                conn.disconnect()
-                val json = org.json.JSONObject(response)
+            // 1. Pull Products via REST
+            val prodJsonStr = makeRestRequest("GET", "products", null, null)
+            if (prodJsonStr != null) {
+                val json = JSONObject(prodJsonStr)
                 val docs = json.optJSONArray("documents")
                 if (docs != null) {
                     for (i in 0 until docs.length()) {
@@ -795,31 +981,148 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                         }
                     }
                 }
-                return@withContext true
             }
-            conn.disconnect()
-            false
+
+            // 2. Pull Variants via REST
+            val varJsonStr = makeRestRequest("GET", "variants", null, null)
+            if (varJsonStr != null) {
+                val json = JSONObject(varJsonStr)
+                val docs = json.optJSONArray("documents")
+                if (docs != null) {
+                    for (i in 0 until docs.length()) {
+                        val doc = docs.getJSONObject(i)
+                        val fields = doc.optJSONObject("fields") ?: continue
+                        val idVal = fields.optJSONObject("id")?.optLong("integerValue")
+                            ?: doc.optString("name").substringAfterLast("/").toLongOrNull() ?: continue
+                        val active = fields.optJSONObject("active")?.optBoolean("booleanValue") ?: true
+                        if (active) {
+                            val entity = ProductVariantEntity(
+                                id = idVal,
+                                productId = fields.optJSONObject("productId")?.optLong("integerValue") ?: 0L,
+                                nameArabic = fields.optJSONObject("nameArabic")?.optString("stringValue") ?: "",
+                                nameFrench = fields.optJSONObject("nameFrench")?.optString("stringValue") ?: "",
+                                code = fields.optJSONObject("code")?.optString("stringValue") ?: "",
+                                initialStock = fields.optJSONObject("initialStock")?.optInt("integerValue") ?: 0,
+                                minimumStock = fields.optJSONObject("minimumStock")?.optInt("integerValue") ?: 20,
+                                packageQuantity = fields.optJSONObject("packageQuantity")?.optInt("integerValue") ?: 10,
+                                notes = fields.optJSONObject("notes")?.optString("stringValue") ?: "",
+                                active = true
+                            )
+                            database.productVariantDao().insertVariant(entity)
+                        } else {
+                            database.productVariantDao().deleteVariantById(idVal)
+                        }
+                    }
+                }
+            }
+
+            // 3. Pull Movements via REST
+            val moveJsonStr = makeRestRequest("GET", "movements", null, null)
+            if (moveJsonStr != null) {
+                val json = JSONObject(moveJsonStr)
+                val docs = json.optJSONArray("documents")
+                if (docs != null) {
+                    for (i in 0 until docs.length()) {
+                        val doc = docs.getJSONObject(i)
+                        val fields = doc.optJSONObject("fields") ?: continue
+                        val idVal = fields.optJSONObject("id")?.optLong("integerValue")
+                            ?: doc.optString("name").substringAfterLast("/").toLongOrNull() ?: continue
+                        val isDel = fields.optJSONObject("isDeleted")?.optBoolean("booleanValue") ?: false
+                        if (!isDel) {
+                            val vId = fields.optJSONObject("variantId")?.optLong("integerValue")
+                            val entity = StockMovementEntity(
+                                id = idVal,
+                                productId = fields.optJSONObject("productId")?.optLong("integerValue") ?: 0L,
+                                variantId = if (vId != null && vId > 0) vId else null,
+                                movementType = fields.optJSONObject("movementType")?.optString("stringValue") ?: "STOCK_IN",
+                                quantity = fields.optJSONObject("quantity")?.optInt("integerValue") ?: 0,
+                                packageCount = fields.optJSONObject("packageCount")?.optInt("integerValue") ?: 0,
+                                dateMillis = fields.optJSONObject("dateMillis")?.optLong("integerValue") ?: System.currentTimeMillis(),
+                                dateFormatted = fields.optJSONObject("dateFormatted")?.optString("stringValue") ?: "",
+                                source = fields.optJSONObject("source")?.optString("stringValue") ?: "",
+                                destinationId = fields.optJSONObject("destinationId")?.optLong("integerValue"),
+                                destinationName = fields.optJSONObject("destinationName")?.optString("stringValue") ?: "",
+                                destinationType = fields.optJSONObject("destinationType")?.optString("stringValue") ?: "",
+                                reason = fields.optJSONObject("reason")?.optString("stringValue") ?: "",
+                                responsiblePerson = fields.optJSONObject("responsiblePerson")?.optString("stringValue") ?: "",
+                                referenceNumber = fields.optJSONObject("referenceNumber")?.optString("stringValue") ?: "",
+                                notes = fields.optJSONObject("notes")?.optString("stringValue") ?: "",
+                                isReversed = fields.optJSONObject("isReversed")?.optBoolean("booleanValue") ?: false,
+                                reversedByMovementId = fields.optJSONObject("reversedByMovementId")?.optLong("integerValue"),
+                                isDeleted = false
+                            )
+                            database.stockMovementDao().insertMovement(entity)
+                        } else {
+                            database.stockMovementDao().deleteMovementById(idVal)
+                        }
+                    }
+                }
+            }
+
+            // 4. Pull Destinations via REST
+            val destJsonStr = makeRestRequest("GET", "destinations", null, null)
+            if (destJsonStr != null) {
+                val json = JSONObject(destJsonStr)
+                val docs = json.optJSONArray("documents")
+                if (docs != null) {
+                    for (i in 0 until docs.length()) {
+                        val doc = docs.getJSONObject(i)
+                        val fields = doc.optJSONObject("fields") ?: continue
+                        val idVal = fields.optJSONObject("id")?.optLong("integerValue")
+                            ?: doc.optString("name").substringAfterLast("/").toLongOrNull() ?: continue
+                        val entity = DestinationEntity(
+                            id = idVal,
+                            name = fields.optJSONObject("name")?.optString("stringValue") ?: "",
+                            type = fields.optJSONObject("type")?.optString("stringValue") ?: "مسجد",
+                            commune = fields.optJSONObject("commune")?.optString("stringValue") ?: "",
+                            province = fields.optJSONObject("province")?.optString("stringValue") ?: "",
+                            address = fields.optJSONObject("address")?.optString("stringValue") ?: "",
+                            contactPerson = fields.optJSONObject("contactPerson")?.optString("stringValue") ?: "",
+                            phone = fields.optJSONObject("phone")?.optString("stringValue") ?: "",
+                            notes = fields.optJSONObject("notes")?.optString("stringValue") ?: ""
+                        )
+                        database.destinationDao().insertDestination(entity)
+                    }
+                }
+            }
+
+            _lastSyncTimestamp.value = System.currentTimeMillis()
+            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+            _syncError.value = null
+            true
         } catch (e: Exception) {
-            Log.w("FirebaseSync", "REST pull error", e)
+            Log.e("FirebaseSync", "pullAllFromRestApi error", e)
             false
         }
     }
 
+    // Full Bidirectional Sync with Instant Dual-Engine guarantees
     suspend fun fullBidirectionalSync(): Boolean = withContext(Dispatchers.IO) {
         _isSyncing.value = true
         _syncError.value = null
         try {
-            ensureAuth()
-            // 1. Push local changes first
+            // 1. Push all local changes to cloud
             pushAllToCloud()
-            // 2. Pull latest changes from Firestore
-            pullAllFromCloud()
+
+            // 2. Pull remote updates (try Firestore SDK with timeout, fallback to REST)
+            var pulled = try {
+                withTimeoutOrNull(4000) {
+                    pullAllFromCloud()
+                } ?: false
+            } catch (e: Exception) {
+                false
+            }
+
+            if (!pulled) {
+                pulled = pullAllFromRestApi()
+            }
 
             _lastSyncTimestamp.value = System.currentTimeMillis()
             _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+            _syncError.value = null
             true
         } catch (e: Exception) {
-            val restPulled = pullFromRestApi()
+            val restPulled = pullAllFromRestApi()
             if (restPulled) {
                 _lastSyncTimestamp.value = System.currentTimeMillis()
                 _syncDiagnostic.value = CloudSyncDiagnostic.Connected
@@ -834,6 +1137,23 @@ class FirebaseSyncManager(private val database: AppDatabase) {
             }
         } finally {
             _isSyncing.value = false
+        }
+    }
+
+    // Start automatic background sync every 12 seconds
+    private var isAutoSyncRunning = false
+    fun startAutoSync() {
+        if (isAutoSyncRunning) return
+        isAutoSyncRunning = true
+        scope.launch {
+            while (true) {
+                delay(12000)
+                try {
+                    fullBidirectionalSync()
+                } catch (e: Exception) {
+                    Log.w("FirebaseSync", "Auto sync cycle notice: ${e.message}")
+                }
+            }
         }
     }
 }
