@@ -330,6 +330,29 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
     val syncDiagnostic: StateFlow<CloudSyncDiagnostic> = repository.syncManager.syncDiagnostic
     val syncError: StateFlow<String?> = repository.syncManager.syncError
     val lastSyncTimestamp: StateFlow<Long?> = repository.syncManager.lastSyncTimestamp
+    val activeListenersMap: StateFlow<Map<String, Boolean>> = repository.syncManager.activeListenersMap
+    val diagnosticReport: StateFlow<com.example.data.sync.FirestoreDiagnosticReport?> = repository.syncManager.diagnosticReport
+
+    private val _isDiagnosing = MutableStateFlow(false)
+    val isDiagnosing: StateFlow<Boolean> = _isDiagnosing.asStateFlow()
+
+    fun runFullDiagnostics() {
+        viewModelScope.launch {
+            _isDiagnosing.value = true
+            try {
+                val report = repository.runComprehensiveFirestoreDiagnostic()
+                if (report.isConnected && report.readPermissionGranted && report.writePermissionGranted && report.allListenersHealthy) {
+                    showMessage("تم الفحص الشامل بنجاح: Firestore متصل وقواعد القراءة/الكتابة والمستمعات تعمل بشكل سليم.")
+                } else {
+                    showMessage("اكتمل الفحص: يرجى مراجعة تفاصيل التقرير وقواعد الأمان.")
+                }
+            } catch (e: Exception) {
+                showMessage("حدث خطأ أثناء الفحص: ${e.message}")
+            } finally {
+                _isDiagnosing.value = false
+            }
+        }
+    }
 
     fun checkCloudConnection() {
         viewModelScope.launch {

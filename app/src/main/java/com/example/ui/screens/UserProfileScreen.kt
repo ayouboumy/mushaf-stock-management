@@ -86,6 +86,10 @@ fun UserProfileScreen(
     val syncDiagnostic by viewModel.syncDiagnostic.collectAsStateWithLifecycle()
     val syncError by viewModel.syncError.collectAsStateWithLifecycle()
     val lastSyncTimestamp by viewModel.lastSyncTimestamp.collectAsStateWithLifecycle()
+    val diagnosticReport by viewModel.diagnosticReport.collectAsStateWithLifecycle()
+    val isDiagnosing by viewModel.isDiagnosing.collectAsStateWithLifecycle()
+    val activeListenersMap by viewModel.activeListenersMap.collectAsStateWithLifecycle()
+    var showLogsExpanded by remember { mutableStateOf(false) }
 
     var nameStr by remember(currentUser) { mutableStateOf(currentUser.fullName) }
     var roleStr by remember(currentUser) { mutableStateOf(currentUser.role) }
@@ -552,20 +556,162 @@ fun UserProfileScreen(
                             }
 
                             OutlinedButton(
-                                onClick = { viewModel.checkCloudConnection() },
-                                modifier = Modifier.weight(1f).height(44.dp).testTag("btn_check_connection"),
+                                onClick = { viewModel.runFullDiagnostics() },
+                                modifier = Modifier.weight(1f).height(44.dp).testTag("btn_run_diagnostics"),
                                 shape = RoundedCornerShape(12.dp),
                                 border = BorderStroke(1.dp, GoldPrimary.copy(alpha = 0.7f))
                             ) {
                                 Icon(imageVector = Icons.Default.CloudDone, contentDescription = null, tint = GoldPrimary, modifier = Modifier.size(17.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    "فحص الاتصال",
+                                    if (isDiagnosing) "جاري الفحص..." else "فحص وتشخيص شامل",
                                     fontFamily = TajawalFontFamily,
                                     fontWeight = FontWeight.Bold,
                                     color = GoldPrimary,
-                                    fontSize = 12.5.sp
+                                    fontSize = 12.sp
                                 )
+                            }
+                        }
+
+                        // Collection Listeners Realtime Status Chips
+                        Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = "مستمعات المجموعات اللحظية (Repository Listeners):",
+                                fontFamily = TajawalFontFamily,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary,
+                                fontSize = 12.sp
+                            )
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                val collections = listOf(
+                                    "products" to "الأصناف",
+                                    "variants" to "الروايات",
+                                    "movements" to "الحركات",
+                                    "destinations" to "الجهات"
+                                )
+                                collections.forEach { (key, title) ->
+                                    val isListening = activeListenersMap[key] == true
+                                    Surface(
+                                        modifier = Modifier.weight(1f),
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = if (isListening) EmeraldContainer else Color(0xFFF2F4F4),
+                                        border = BorderStroke(1.dp, if (isListening) EmeraldPrimary.copy(alpha = 0.4f) else Color.LightGray)
+                                    ) {
+                                        Column(
+                                            modifier = Modifier.padding(vertical = 6.dp, horizontal = 4.dp),
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            verticalArrangement = Arrangement.Center
+                                        ) {
+                                            Text(
+                                                text = title,
+                                                fontFamily = TajawalFontFamily,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (isListening) EmeraldPrimary else TextSecondary,
+                                                fontSize = 10.5.sp
+                                            )
+                                            Text(
+                                                text = if (isListening) "نشط ✓" else "مستعد",
+                                                fontFamily = TajawalFontFamily,
+                                                color = if (isListening) EmeraldPrimary else TextMuted,
+                                                fontSize = 9.sp
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Detailed Diagnostic Report Card if Available
+                        diagnosticReport?.let { report ->
+                            Surface(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (report.isConnected && report.readPermissionGranted && report.writePermissionGranted) EmeraldContainer.copy(alpha = 0.5f) else GoldContainer.copy(alpha = 0.6f),
+                                border = BorderStroke(1.dp, if (report.isConnected && report.readPermissionGranted) EmeraldPrimary.copy(alpha = 0.4f) else GoldBorder)
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "تقرير الفحص والتشخيص الأخير",
+                                            fontFamily = TajawalFontFamily,
+                                            fontWeight = FontWeight.Bold,
+                                            color = TextPrimary,
+                                            fontSize = 12.5.sp
+                                        )
+                                        Text(
+                                            text = "${report.latencyMs}ms | ${report.connectionEngine}",
+                                            fontFamily = TajawalFontFamily,
+                                            color = TextSecondary,
+                                            fontSize = 10.sp
+                                        )
+                                    }
+
+                                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Text(
+                                            text = "صلاحية القراءة: ${if (report.readPermissionGranted) "مفعلة ✓" else "خطأ ✗"}",
+                                            fontFamily = TajawalFontFamily,
+                                            fontWeight = FontWeight.Medium,
+                                            color = if (report.readPermissionGranted) EmeraldPrimary else Color(0xFFC0392B),
+                                            fontSize = 11.sp
+                                        )
+                                        Text(
+                                            text = "صلاحية الكتابة: ${if (report.writePermissionGranted) "مفعلة وتعمل ✓" else "خطأ ✗"}",
+                                            fontFamily = TajawalFontFamily,
+                                            fontWeight = FontWeight.Medium,
+                                            color = if (report.writePermissionGranted) EmeraldPrimary else Color(0xFFC0392B),
+                                            fontSize = 11.sp
+                                        )
+                                    }
+
+                                    Text(
+                                        text = report.diagnosticSummaryArabic,
+                                        fontFamily = TajawalFontFamily,
+                                        color = TextPrimary,
+                                        fontSize = 11.sp,
+                                        lineHeight = 15.sp
+                                    )
+
+                                    if (report.logMessages.isNotEmpty()) {
+                                        ButtonDefaults.textButtonColors()
+                                        OutlinedButton(
+                                            onClick = { showLogsExpanded = !showLogsExpanded },
+                                            modifier = Modifier.fillMaxWidth().height(32.dp),
+                                            shape = RoundedCornerShape(8.dp),
+                                            border = BorderStroke(0.8.dp, AppBorder),
+                                            contentPadding = PaddingValues(0.dp)
+                                        ) {
+                                            Text(
+                                                text = if (showLogsExpanded) "إخفاء سجل الفحص" else "عرض سجل الفحص المفصل (${report.logMessages.size} أسطر)",
+                                                fontFamily = TajawalFontFamily,
+                                                fontSize = 11.sp,
+                                                color = TextSecondary
+                                            )
+                                        }
+
+                                        if (showLogsExpanded) {
+                                            Surface(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                shape = RoundedCornerShape(8.dp),
+                                                color = Color(0xFF1E272C)
+                                            ) {
+                                                Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                                    report.logMessages.forEach { logLine ->
+                                                        Text(
+                                                            text = logLine,
+                                                            color = if (logLine.contains("✗") || logLine.contains("خطأ")) Color(0xFFFF7675) else if (logLine.contains("✓")) Color(0xFF55EFC4) else Color(0xFFDFE6E9),
+                                                            fontSize = 9.5.sp,
+                                                            lineHeight = 13.sp
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

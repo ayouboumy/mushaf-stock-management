@@ -56,6 +56,9 @@ interface StockMovementDao {
     @Query("UPDATE stock_movements SET isReversed = 1, reversedByMovementId = :reversedById, updatedAt = :timestamp WHERE id = :id")
     suspend fun markReversed(id: Long, reversedById: Long, timestamp: Long = System.currentTimeMillis())
 
+    @Query("DELETE FROM stock_movements WHERE productId = :productId")
+    suspend fun deleteMovementsByProduct(productId: Long)
+
     @Query("DELETE FROM stock_movements")
     suspend fun clearAllMovements()
 }

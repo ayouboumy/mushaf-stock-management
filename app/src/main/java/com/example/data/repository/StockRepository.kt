@@ -36,6 +36,18 @@ class StockRepository(private val database: AppDatabase) {
         syncManager.startAutoSync()
     }
 
+    // Diagnostic & Health Verification
+    suspend fun runComprehensiveFirestoreDiagnostic(): com.example.data.sync.FirestoreDiagnosticReport {
+        return syncManager.runComprehensiveDiagnostic()
+    }
+
+    fun ensureCollectionListenersActive() {
+        syncManager.ensureCollectionListenersActive()
+    }
+
+    val activeListenersMap = syncManager.activeListenersMap
+    val diagnosticReport = syncManager.diagnosticReport
+
     val allProducts: Flow<List<ProductEntity>> = productDao.getActiveProducts()
     val distinctCategories: Flow<List<String>> = productDao.getDistinctCategories()
     val allDestinations: Flow<List<DestinationEntity>> = destinationDao.getAllDestinations()
@@ -496,15 +508,20 @@ class StockRepository(private val database: AppDatabase) {
 
     suspend fun deleteProduct(productId: Long) {
         val prod = productDao.getProductById(productId)
-        productDao.deleteProductById(productId)
+        val productMovements = movementDao.getAllMovementsList().filter { it.productId == productId }
+        for (m in productMovements) {
+            syncManager.deleteMovement(m.id)
+        }
+        movementDao.deleteMovementsByProduct(productId)
         variantDao.deleteVariantsByProduct(productId)
+        productDao.deleteProductById(productId)
         syncManager.deleteProduct(productId)
         auditLogDao.insertLog(
             AuditLogEntity(
                 action = "DELETE_PRODUCT",
                 entityName = "حذف صنف",
                 entityId = productId,
-                details = "حذف الصنف: ${prod?.nameArabic ?: productId}"
+                details = "حذف الصنف: ${prod?.nameArabic ?: productId} مع كافة حركاته وتفريعاته"
             )
         )
     }
@@ -674,6 +691,7 @@ class StockRepository(private val database: AppDatabase) {
 
     // Clear all data safely in child-to-parent order on IO dispatcher (local and cloud)
     suspend fun clearAllData(clearCloud: Boolean = true) = withContext(Dispatchers.IO) {
+        syncManager.stopListeners()
         movementDao.clearAllMovements()
         variantDao.clearAllVariants()
         productDao.clearAllProducts()
@@ -686,5 +704,6 @@ class StockRepository(private val database: AppDatabase) {
                 android.util.Log.e("StockRepository", "clearAllCloudData error", e)
             }
         }
+        syncManager.startRealtimeListeners()
     }
 }

@@ -34,6 +34,26 @@ sealed class CloudSyncDiagnostic {
     data class GeneralError(val message: String, val technicalDetail: String) : CloudSyncDiagnostic()
 }
 
+data class FirestoreDiagnosticReport(
+    val timestamp: Long = System.currentTimeMillis(),
+    val isConnected: Boolean,
+    val connectionEngine: String, // "Firestore SDK (gRPC)" or "Firestore REST Engine" or "None"
+    val latencyMs: Long,
+    val authenticatedUserId: String?,
+    val isAuthAnonymous: Boolean,
+    val readPermissionGranted: Boolean,
+    val readErrorMessage: String? = null,
+    val readSampleCount: Int = 0,
+    val writePermissionGranted: Boolean,
+    val writeErrorMessage: String? = null,
+    val writeVerifiedWithCleanup: Boolean = false,
+    val listenersCount: Int,
+    val activeListeners: Map<String, Boolean>,
+    val allListenersHealthy: Boolean,
+    val diagnosticSummaryArabic: String,
+    val logMessages: List<String>
+)
+
 class FirebaseSyncManager(private val database: AppDatabase) {
 
     private val firestore: FirebaseFirestore by lazy { FirebaseFirestore.getInstance() }
@@ -56,6 +76,19 @@ class FirebaseSyncManager(private val database: AppDatabase) {
 
     private val _syncDiagnostic = MutableStateFlow<CloudSyncDiagnostic>(CloudSyncDiagnostic.Idle)
     val syncDiagnostic: StateFlow<CloudSyncDiagnostic> = _syncDiagnostic.asStateFlow()
+
+    private val _activeListenersMap = MutableStateFlow<Map<String, Boolean>>(
+        mapOf(
+            "products" to false,
+            "variants" to false,
+            "movements" to false,
+            "destinations" to false
+        )
+    )
+    val activeListenersMap: StateFlow<Map<String, Boolean>> = _activeListenersMap.asStateFlow()
+
+    private val _diagnosticReport = MutableStateFlow<FirestoreDiagnosticReport?>(null)
+    val diagnosticReport: StateFlow<FirestoreDiagnosticReport?> = _diagnosticReport.asStateFlow()
 
     fun parseErrorToDiagnostic(e: Throwable): CloudSyncDiagnostic {
         val msg = e.message ?: e.localizedMessage ?: "Unknown error"
@@ -188,42 +221,36 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                     .addSnapshotListener { snapshot, error ->
                         if (error != null) {
                             Log.e("FirebaseSync", "Products listen error: ${error.message}")
+                            _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("products", false) }
                             _syncDiagnostic.value = parseErrorToDiagnostic(error)
                             _syncError.value = error.message
                             return@addSnapshotListener
                         }
+                        _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("products", true) }
                         _syncDiagnostic.value = CloudSyncDiagnostic.Connected
-                        if (snapshot != null) {
+                        if (snapshot != null && !snapshot.isEmpty) {
                             scope.launch {
                                 try {
-                                    if (snapshot.isEmpty) {
-                                        // Do not delete local products; push local if available
-                                        val localProducts = database.productDao().getAllProductsList()
-                                        for (lp in localProducts) {
-                                            pushProduct(lp)
-                                        }
-                                    } else {
-                                        for (doc in snapshot.documents) {
-                                            val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                                            val isActive = doc.getBoolean("active") ?: true
-                                            if (isActive) {
-                                                val entity = ProductEntity(
-                                                    id = id,
-                                                    nameArabic = doc.getString("nameArabic") ?: "",
-                                                    nameFrench = doc.getString("nameFrench") ?: "",
-                                                    category = doc.getString("category") ?: "مصحف شريف",
-                                                    formatType = doc.getString("formatType") ?: "عادي",
-                                                    unit = doc.getString("unit") ?: "نسخة",
-                                                    packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 1,
-                                                    minimumStock = doc.getLong("minimumStock")?.toInt() ?: 0,
-                                                    initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
-                                                    notes = doc.getString("notes") ?: "",
-                                                    active = true
-                                                )
-                                                database.productDao().insertProduct(entity)
-                                            } else {
-                                                database.productDao().deleteProductById(id)
-                                            }
+                                    for (doc in snapshot.documents) {
+                                        val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
+                                        val isActive = doc.getBoolean("active") ?: true
+                                        if (isActive) {
+                                            val entity = ProductEntity(
+                                                id = id,
+                                                nameArabic = doc.getString("nameArabic") ?: "",
+                                                nameFrench = doc.getString("nameFrench") ?: "",
+                                                category = doc.getString("category") ?: "مصحف شريف",
+                                                formatType = doc.getString("formatType") ?: "عادي",
+                                                unit = doc.getString("unit") ?: "نسخة",
+                                                packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 1,
+                                                minimumStock = doc.getLong("minimumStock")?.toInt() ?: 0,
+                                                initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
+                                                notes = doc.getString("notes") ?: "",
+                                                active = true
+                                            )
+                                            database.productDao().insertProduct(entity)
+                                        } else {
+                                            database.productDao().deleteProductById(id)
                                         }
                                     }
                                     _lastSyncTimestamp.value = System.currentTimeMillis()
@@ -234,46 +261,42 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                         }
                     }
                 listeners.add(prodListener)
+                _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("products", true) }
 
                 // 2. Listen to Product Variants
                 val variantListener = firestore.collection("variants")
                     .addSnapshotListener { snapshot, error ->
                         if (error != null) {
                             Log.e("FirebaseSync", "Variants listen error: ${error.message}")
+                            _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("variants", false) }
                             _syncDiagnostic.value = parseErrorToDiagnostic(error)
                             _syncError.value = error.message
                             return@addSnapshotListener
                         }
+                        _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("variants", true) }
                         _syncDiagnostic.value = CloudSyncDiagnostic.Connected
-                        if (snapshot != null) {
+                        if (snapshot != null && !snapshot.isEmpty) {
                             scope.launch {
                                 try {
-                                    if (snapshot.isEmpty) {
-                                        val localVariants = database.productVariantDao().getAllVariantsList()
-                                        for (lv in localVariants) {
-                                            pushVariant(lv)
-                                        }
-                                    } else {
-                                        for (doc in snapshot.documents) {
-                                            val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                                            val isActive = doc.getBoolean("active") ?: true
-                                            if (isActive) {
-                                                val entity = ProductVariantEntity(
-                                                    id = id,
-                                                    productId = doc.getLong("productId") ?: 0L,
-                                                    nameArabic = doc.getString("nameArabic") ?: "",
-                                                    nameFrench = doc.getString("nameFrench") ?: "",
-                                                    code = doc.getString("code") ?: "",
-                                                    initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
-                                                    minimumStock = doc.getLong("minimumStock")?.toInt() ?: 20,
-                                                    packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 10,
-                                                    notes = doc.getString("notes") ?: "",
-                                                    active = true
-                                                )
-                                                database.productVariantDao().insertVariant(entity)
-                                            } else {
-                                                database.productVariantDao().deleteVariantById(id)
-                                            }
+                                    for (doc in snapshot.documents) {
+                                        val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
+                                        val isActive = doc.getBoolean("active") ?: true
+                                        if (isActive) {
+                                            val entity = ProductVariantEntity(
+                                                id = id,
+                                                productId = doc.getLong("productId") ?: 0L,
+                                                nameArabic = doc.getString("nameArabic") ?: "",
+                                                nameFrench = doc.getString("nameFrench") ?: "",
+                                                code = doc.getString("code") ?: "",
+                                                initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
+                                                minimumStock = doc.getLong("minimumStock")?.toInt() ?: 20,
+                                                packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 10,
+                                                notes = doc.getString("notes") ?: "",
+                                                active = true
+                                            )
+                                            database.productVariantDao().insertVariant(entity)
+                                        } else {
+                                            database.productVariantDao().deleteVariantById(id)
                                         }
                                     }
                                     _lastSyncTimestamp.value = System.currentTimeMillis()
@@ -284,55 +307,51 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                         }
                     }
                 listeners.add(variantListener)
+                _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("variants", true) }
 
                 // 3. Listen to Stock Movements
                 val moveListener = firestore.collection("movements")
                     .addSnapshotListener { snapshot, error ->
                         if (error != null) {
                             Log.e("FirebaseSync", "Movements listen error: ${error.message}")
+                            _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("movements", false) }
                             _syncDiagnostic.value = parseErrorToDiagnostic(error)
                             _syncError.value = error.message
                             return@addSnapshotListener
                         }
+                        _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("movements", true) }
                         _syncDiagnostic.value = CloudSyncDiagnostic.Connected
-                        if (snapshot != null) {
+                        if (snapshot != null && !snapshot.isEmpty) {
                             scope.launch {
                                 try {
-                                    if (snapshot.isEmpty) {
-                                        val localMovements = database.stockMovementDao().getAllActiveMovementsList()
-                                        for (lm in localMovements) {
-                                            pushMovement(lm)
-                                        }
-                                    } else {
-                                        for (doc in snapshot.documents) {
-                                            val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                                            val isDel = doc.getBoolean("isDeleted") ?: false
-                                            if (!isDel) {
-                                                val entity = StockMovementEntity(
-                                                    id = id,
-                                                    productId = doc.getLong("productId") ?: 0L,
-                                                    variantId = doc.getLong("variantId"),
-                                                    movementType = doc.getString("movementType") ?: "STOCK_IN",
-                                                    quantity = doc.getLong("quantity")?.toInt() ?: 0,
-                                                    packageCount = doc.getLong("packageCount")?.toInt() ?: 0,
-                                                    dateMillis = doc.getLong("dateMillis") ?: System.currentTimeMillis(),
-                                                    dateFormatted = doc.getString("dateFormatted") ?: "",
-                                                    source = doc.getString("source") ?: "",
-                                                    destinationId = doc.getLong("destinationId"),
-                                                    destinationName = doc.getString("destinationName") ?: "",
-                                                    destinationType = doc.getString("destinationType") ?: "",
-                                                    reason = doc.getString("reason") ?: "",
-                                                    responsiblePerson = doc.getString("responsiblePerson") ?: "",
-                                                    referenceNumber = doc.getString("referenceNumber") ?: "",
-                                                    notes = doc.getString("notes") ?: "",
-                                                    isReversed = doc.getBoolean("isReversed") ?: false,
-                                                    reversedByMovementId = doc.getLong("reversedByMovementId"),
-                                                    isDeleted = false
-                                                )
-                                                database.stockMovementDao().insertMovement(entity)
-                                            } else {
-                                                database.stockMovementDao().deleteMovementById(id)
-                                            }
+                                    for (doc in snapshot.documents) {
+                                        val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
+                                        val isDel = doc.getBoolean("isDeleted") ?: false
+                                        if (!isDel) {
+                                            val entity = StockMovementEntity(
+                                                id = id,
+                                                productId = doc.getLong("productId") ?: 0L,
+                                                variantId = doc.getLong("variantId"),
+                                                movementType = doc.getString("movementType") ?: "STOCK_IN",
+                                                quantity = doc.getLong("quantity")?.toInt() ?: 0,
+                                                packageCount = doc.getLong("packageCount")?.toInt() ?: 0,
+                                                dateMillis = doc.getLong("dateMillis") ?: System.currentTimeMillis(),
+                                                dateFormatted = doc.getString("dateFormatted") ?: "",
+                                                source = doc.getString("source") ?: "",
+                                                destinationId = doc.getLong("destinationId"),
+                                                destinationName = doc.getString("destinationName") ?: "",
+                                                destinationType = doc.getString("destinationType") ?: "",
+                                                reason = doc.getString("reason") ?: "",
+                                                responsiblePerson = doc.getString("responsiblePerson") ?: "",
+                                                referenceNumber = doc.getString("referenceNumber") ?: "",
+                                                notes = doc.getString("notes") ?: "",
+                                                isReversed = doc.getBoolean("isReversed") ?: false,
+                                                reversedByMovementId = doc.getLong("reversedByMovementId"),
+                                                isDeleted = false
+                                            )
+                                            database.stockMovementDao().insertMovement(entity)
+                                        } else {
+                                            database.stockMovementDao().deleteMovementById(id)
                                         }
                                     }
                                     _lastSyncTimestamp.value = System.currentTimeMillis()
@@ -343,40 +362,36 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                         }
                     }
                 listeners.add(moveListener)
+                _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("movements", true) }
 
                 // 4. Listen to Destinations
                 val destListener = firestore.collection("destinations")
                     .addSnapshotListener { snapshot, error ->
                         if (error != null) {
                             Log.e("FirebaseSync", "Destinations listen error: ${error.message}")
+                            _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("destinations", false) }
                             _syncDiagnostic.value = parseErrorToDiagnostic(error)
                             _syncError.value = error.message
                             return@addSnapshotListener
                         }
+                        _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("destinations", true) }
                         _syncDiagnostic.value = CloudSyncDiagnostic.Connected
-                        if (snapshot != null) {
+                        if (snapshot != null && !snapshot.isEmpty) {
                             scope.launch {
                                 try {
-                                    if (snapshot.isEmpty) {
-                                        val localDestinations = database.destinationDao().getAllDestinationsList()
-                                        for (ld in localDestinations) {
-                                            pushDestination(ld)
-                                        }
-                                    } else {
-                                        for (doc in snapshot.documents) {
-                                            val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                                            val entity = DestinationEntity(
-                                                id = id,
-                                                name = doc.getString("name") ?: "",
-                                                type = doc.getString("type") ?: "مسجد",
-                                                commune = doc.getString("commune") ?: "",
-                                                province = doc.getString("province") ?: "",
-                                                address = doc.getString("address") ?: "",
-                                                contactPerson = doc.getString("contactPerson") ?: "",
-                                                phone = doc.getString("phone") ?: ""
-                                            )
-                                            database.destinationDao().insertDestination(entity)
-                                        }
+                                    for (doc in snapshot.documents) {
+                                        val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
+                                        val entity = DestinationEntity(
+                                            id = id,
+                                            name = doc.getString("name") ?: "",
+                                            type = doc.getString("type") ?: "مسجد",
+                                            commune = doc.getString("commune") ?: "",
+                                            province = doc.getString("province") ?: "",
+                                            address = doc.getString("address") ?: "",
+                                            contactPerson = doc.getString("contactPerson") ?: "",
+                                            phone = doc.getString("phone") ?: ""
+                                        )
+                                        database.destinationDao().insertDestination(entity)
                                     }
                                     _lastSyncTimestamp.value = System.currentTimeMillis()
                                 } catch (e: Exception) {
@@ -386,6 +401,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                         }
                     }
                 listeners.add(destListener)
+                _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("destinations", true) }
             } catch (e: Exception) {
                 Log.e("FirebaseSync", "Failed to start Firebase listeners", e)
             }
@@ -397,6 +413,206 @@ class FirebaseSyncManager(private val database: AppDatabase) {
             l.remove()
         }
         listeners.clear()
+        _activeListenersMap.value = mapOf(
+            "products" to false,
+            "variants" to false,
+            "movements" to false,
+            "destinations" to false
+        )
+    }
+
+    // Ensure collection listeners are active and registered
+    fun ensureCollectionListenersActive() {
+        if (listeners.size < 4 || _activeListenersMap.value.values.any { !it }) {
+            Log.i("FirestoreDiagnostic", "Re-initializing collection listeners (current: ${listeners.size})")
+            startRealtimeListeners()
+        }
+    }
+
+    // Comprehensive Diagnostic Utility: Verifies Connection, Read/Write permissions, and Collection Listeners
+    suspend fun runComprehensiveDiagnostic(): FirestoreDiagnosticReport = withContext(Dispatchers.IO) {
+        val startTime = System.currentTimeMillis()
+        val logList = mutableListOf<String>()
+        fun log(msg: String, isError: Boolean = false) {
+            val entry = "[${java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date())}] $msg"
+            logList.add(entry)
+            if (isError) {
+                Log.e("FirestoreDiagnostic", msg)
+            } else {
+                Log.i("FirestoreDiagnostic", msg)
+            }
+        }
+
+        log("========== بدء الفحص الشامل لاتصال وقواعد Firestore ==========")
+        
+        // 1. Authentication Status Check
+        var authUid: String? = null
+        var isAnonymous = false
+        try {
+            ensureAuth()
+            val user = auth.currentUser
+            authUid = user?.uid
+            isAnonymous = user?.isAnonymous ?: true
+            log("1. المصادقة (Auth): معرف المستخدم = ${authUid ?: "بدون مصادقة مباشر"} (مجهول: $isAnonymous)")
+        } catch (e: Exception) {
+            log("1. تنبيه المصادقة: ${e.message}", isError = true)
+        }
+
+        // 2. Test Connection & Read Permissions
+        var readSuccess = false
+        var readErrMsg: String? = null
+        var readCount = 0
+        var engine = "None"
+        try {
+            log("2. فحص صلاحية القراءة (Read Permission Test)...")
+            val snapshot = withTimeoutOrNull(3000) {
+                firestore.collection("products").limit(5).get().await()
+            }
+            if (snapshot != null) {
+                readSuccess = true
+                readCount = snapshot.size()
+                engine = "Firestore SDK (gRPC)"
+                log("   ✓ نجحت القراءة عبر Firestore SDK. تم جلب $readCount مستندات.")
+            } else {
+                log("   ! مهلة محرك Firestore SDK. جاري الفحص عبر محرك REST المباشر...")
+                val restResponse = makeRestRequest("GET", "products", null, null)
+                if (restResponse != null) {
+                    readSuccess = true
+                    engine = "Firestore REST Fallback Engine"
+                    val json = JSONObject(restResponse)
+                    readCount = json.optJSONArray("documents")?.length() ?: 0
+                    log("   ✓ نجحت القراءة عبر Firestore REST API. تم جلب $readCount مستندات.")
+                } else {
+                    readSuccess = false
+                    readErrMsg = "تعذر قراءة البيانات عبر كل من SDK و REST"
+                    log("   ✗ فشلت القراءة عبر كلا المحركين: $readErrMsg", isError = true)
+                }
+            }
+        } catch (e: Exception) {
+            val msg = e.localizedMessage ?: e.message ?: "Unknown Read Error"
+            readSuccess = false
+            readErrMsg = msg
+            log("   ✗ خطأ أثناء فحص صلاحية القراءة: $msg", isError = true)
+            if (msg.contains("PERMISSION_DENIED", ignoreCase = true) || msg.contains("Missing or insufficient permissions", ignoreCase = true)) {
+                log("   [تنبيه أمان Rules]: قواعد الأمان تمنع القراءة من Firestore (Missing Read Permissions)", isError = true)
+            }
+        }
+
+        // 3. Test Write & Delete Permissions (Clean Probe)
+        var writeSuccess = false
+        var writeErrMsg: String? = null
+        var writeVerifiedWithCleanup = false
+        val probeId = "health_probe_${System.currentTimeMillis()}"
+        try {
+            log("3. فحص صلاحية الكتابة والحذف (Write & Delete Permission Test)...")
+            val probeData = hashMapOf(
+                "probeId" to probeId,
+                "timestamp" to System.currentTimeMillis(),
+                "test" to "diagnostic_ping"
+            )
+            
+            var sdkWriteOk = false
+            try {
+                withTimeoutOrNull(3000) {
+                    firestore.collection("_health_probes").document(probeId).set(probeData).await()
+                    firestore.collection("_health_probes").document(probeId).delete().await()
+                    sdkWriteOk = true
+                }
+            } catch (e: Exception) {
+                sdkWriteOk = false
+                log("   ! SDK write attempt notice: ${e.message}")
+            }
+
+            if (sdkWriteOk) {
+                writeSuccess = true
+                writeVerifiedWithCleanup = true
+                log("   ✓ نجحت الكتابة والحذف الفوري عبر Firestore SDK.")
+            } else {
+                // Fallback test via REST
+                log("   جاري اختبار الكتابة عبر محرك REST المباشر...")
+                val probeJson = JSONObject().apply {
+                    put("fields", JSONObject().apply {
+                        put("test", JSONObject().put("stringValue", "diagnostic_ping"))
+                        put("timestamp", JSONObject().put("integerValue", System.currentTimeMillis().toString()))
+                    })
+                }
+                val restWrite = makeRestRequest("PATCH", "_health_probes", probeId, probeJson.toString())
+                if (restWrite != null) {
+                    makeRestRequest("DELETE", "_health_probes", probeId, null)
+                    writeSuccess = true
+                    writeVerifiedWithCleanup = true
+                    log("   ✓ نجحت الكتابة والحذف عبر Firestore REST Engine.")
+                } else {
+                    writeSuccess = false
+                    writeErrMsg = "تعذر تنفيذ عمليات الكتابة السحابية (يرجى التحقق من قواعد Write Rules)"
+                    log("   ✗ فشلت الكتابة: $writeErrMsg", isError = true)
+                }
+            }
+        } catch (e: Exception) {
+            val msg = e.localizedMessage ?: e.message ?: "Unknown Write Error"
+            writeSuccess = false
+            writeErrMsg = msg
+            log("   ✗ خطأ أثناء فحص صلاحية الكتابة: $msg", isError = true)
+            if (msg.contains("PERMISSION_DENIED", ignoreCase = true) || msg.contains("Missing or insufficient permissions", ignoreCase = true)) {
+                log("   [تنبيه أمان Rules]: قواعد الأمان تمنع الكتابة إلى Firestore (Missing Write Permissions)", isError = true)
+            }
+        }
+
+        // 4. Verify & Ensure Collection Listeners
+        log("4. فحص تهيئة مستمعات المجموعات في طبقة المستودع (Collection Listeners)...")
+        ensureCollectionListenersActive()
+        val currentListeners = _activeListenersMap.value
+        val allListenersActive = currentListeners.values.all { it } && listeners.size >= 4
+        log("   مستمعات المجموعات المسجلة: ${listeners.size} / 4")
+        currentListeners.forEach { (col, active) ->
+            log("   - مجموعة [$col]: ${if (active) "نشطة وتستمع للتحديثات ✓" else "غير نشطة ✗"}")
+        }
+
+        val totalLatency = System.currentTimeMillis() - startTime
+        val isOverallHealthy = readSuccess && (writeSuccess || writeVerifiedWithCleanup) && allListenersActive
+
+        val summaryArabic = buildString {
+            if (isOverallHealthy) {
+                append("جميع خدمات Firestore تعمل بشكل سليم وصحي.\n")
+                append("• الاتصال: متصل عبر $engine (زمن الاستجابة: ${totalLatency}ms)\n")
+                append("• صلاحيات القراءة: مفعلة ومؤكدة ($readCount عناصر)\n")
+                append("• صلاحيات الكتابة: مفعلة ومؤكدة مع تنظيف تجريبي\n")
+                append("• المستمعات اللحظية: 4 مجموعات نشطة ومسجلة.")
+            } else {
+                append("تم رصد بعض الملاحظات في الفحص:\n")
+                if (!readSuccess) append("• مشكلة في القراءة: $readErrMsg\n")
+                if (!writeSuccess) append("• مشكلة في الكتابة: $writeErrMsg\n")
+                if (!allListenersActive) append("• بعض مستمعات المجموعات غير نشطة (${listeners.size}/4)\n")
+            }
+        }
+
+        log("========== اكتمل الفحص الشامل في ${totalLatency}ms (الحالة: ${if (isOverallHealthy) "سليم" else "تنبيه"}) ==========")
+
+        val report = FirestoreDiagnosticReport(
+            timestamp = System.currentTimeMillis(),
+            isConnected = readSuccess,
+            connectionEngine = engine,
+            latencyMs = totalLatency,
+            authenticatedUserId = authUid,
+            isAuthAnonymous = isAnonymous,
+            readPermissionGranted = readSuccess,
+            readErrorMessage = readErrMsg,
+            readSampleCount = readCount,
+            writePermissionGranted = writeSuccess,
+            writeErrorMessage = writeErrMsg,
+            writeVerifiedWithCleanup = writeVerifiedWithCleanup,
+            listenersCount = listeners.size,
+            activeListeners = currentListeners,
+            allListenersHealthy = allListenersActive,
+            diagnosticSummaryArabic = summaryArabic,
+            logMessages = logList
+        )
+
+        _diagnosticReport.value = report
+        if (readSuccess) {
+            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+        }
+        report
     }
 
     // Pull ALL collections from Firestore into local Room database
@@ -826,6 +1042,21 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         _syncError.value = null
     }
 
+    suspend fun deleteMovement(movementId: Long) = withContext(Dispatchers.IO) {
+        val sdkSuccess = try {
+            withTimeoutOrNull(2500) {
+                ensureAuth()
+                firestore.collection("movements").document(movementId.toString()).delete().await()
+                true
+            } ?: false
+        } catch (e: Exception) {
+            false
+        }
+        if (!sdkSuccess) {
+            makeRestRequest("DELETE", "movements", movementId.toString(), null)
+        }
+    }
+
     suspend fun pushDestination(destination: DestinationEntity) = withContext(Dispatchers.IO) {
         val sdkSuccess = try {
             withTimeoutOrNull(2500) {
@@ -917,33 +1148,52 @@ class FirebaseSyncManager(private val database: AppDatabase) {
     }
 
     suspend fun clearAllCloudData() = withContext(Dispatchers.IO) {
+        val collections = listOf("products", "variants", "movements", "destinations", "_health_probes")
         try {
             ensureAuth()
-            val prodDocs = firestore.collection("products").get().await()
-            for (doc in prodDocs.documents) {
-                doc.reference.delete().await()
+            // 1. SDK deletion
+            for (col in collections) {
+                try {
+                    withTimeoutOrNull(2500) {
+                        val docs = firestore.collection(col).get().await()
+                        for (doc in docs.documents) {
+                            doc.reference.delete().await()
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w("FirebaseSync", "SDK clear col $col notice: ${e.message}")
+                }
             }
-            val varDocs = firestore.collection("variants").get().await()
-            for (doc in varDocs.documents) {
-                doc.reference.delete().await()
-            }
-            val moveDocs = firestore.collection("movements").get().await()
-            for (doc in moveDocs.documents) {
-                doc.reference.delete().await()
-            }
-            val destDocs = firestore.collection("destinations").get().await()
-            for (doc in destDocs.documents) {
-                doc.reference.delete().await()
-            }
-            _lastSyncTimestamp.value = System.currentTimeMillis()
-            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
-            Log.d("FirebaseSync", "All cloud data cleared successfully")
         } catch (e: Exception) {
-            val diag = parseErrorToDiagnostic(e)
-            _syncDiagnostic.value = diag
-            _syncError.value = e.localizedMessage ?: e.message
-            Log.e("FirebaseSync", "clearAllCloudData error", e)
+            Log.w("FirebaseSync", "SDK clearAllCloudData notice: ${e.message}")
         }
+
+        // 2. Comprehensive REST deletion for all documents in each collection
+        for (col in collections) {
+            try {
+                val jsonStr = makeRestRequest("GET", col, null, null)
+                if (jsonStr != null) {
+                    val json = JSONObject(jsonStr)
+                    val docs = json.optJSONArray("documents")
+                    if (docs != null) {
+                        for (i in 0 until docs.length()) {
+                            val doc = docs.getJSONObject(i)
+                            val name = doc.optString("name")
+                            val docId = name.substringAfterLast("/")
+                            if (docId.isNotBlank()) {
+                                makeRestRequest("DELETE", col, docId, null)
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("FirebaseSync", "REST clear col $col error", e)
+            }
+        }
+
+        _lastSyncTimestamp.value = System.currentTimeMillis()
+        _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+        Log.d("FirebaseSync", "All cloud data cleared and deleted via SDK and REST")
     }
 
     // Pull ALL collections via REST API (Ultra reliable)
