@@ -237,13 +237,6 @@ fun SettingsScreen(
                             subtitle = "توثيق العمليات والمشرفين",
                             onClick = { viewModel.navigateTo(AppScreen.AUDIT_LOG_VIEW) }
                         )
-                        HorizontalDivider(color = AppBorder, thickness = 0.8.dp)
-                        SettingsRow(
-                            icon = Icons.Default.Rule,
-                            title = "الأرصدة الافتتاحية",
-                            subtitle = "تعديل رصيد الانطلاق للأصناف",
-                            onClick = { viewModel.navigateTo(AppScreen.INITIAL_STOCK_FORM) }
-                        )
                     }
                 }
             }

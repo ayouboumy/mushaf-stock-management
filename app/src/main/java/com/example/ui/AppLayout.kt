@@ -48,7 +48,6 @@ import com.example.ui.screens.AuditLogScreen
 import com.example.ui.screens.DashboardScreen
 import com.example.ui.screens.DestinationsManageScreen
 import com.example.ui.screens.ExcelImportWizardScreen
-import com.example.ui.screens.InitialStockScreen
 import com.example.ui.screens.MovementsHistoryScreen
 import com.example.ui.screens.ProductDetailScreen
 import com.example.ui.screens.ReportsScreen
@@ -275,7 +274,6 @@ fun AppLayout(
                     AppScreen.STOCK_IN_FORM -> StockInScreen(viewModel = viewModel)
                     AppScreen.STOCK_OUT_FORM -> StockOutScreen(viewModel = viewModel)
                     AppScreen.ADJUSTMENT_FORM -> StockAdjustmentScreen(viewModel = viewModel)
-                    AppScreen.INITIAL_STOCK_FORM -> InitialStockScreen(viewModel = viewModel)
                     AppScreen.ADD_PRODUCT_FORM -> AddProductScreen(viewModel = viewModel)
                     AppScreen.MOVEMENTS -> MovementsHistoryScreen(viewModel = viewModel)
                     AppScreen.REPORTS -> ReportsScreen(viewModel = viewModel)
