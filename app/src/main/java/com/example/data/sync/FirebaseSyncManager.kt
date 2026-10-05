@@ -56,8 +56,17 @@ data class FirestoreDiagnosticReport(
 
 class FirebaseSyncManager(private val database: AppDatabase) {
 
-    private val firestore: FirebaseFirestore by lazy { FirebaseFirestore.getInstance() }
-    private val auth: FirebaseAuth by lazy { FirebaseAuth.getInstance() }
+    private val firestore: FirebaseFirestore
+        get() {
+            com.example.StockApplication.initializeFirebase(com.example.StockApplication.appContext)
+            return FirebaseFirestore.getInstance()
+        }
+
+    private val auth: FirebaseAuth
+        get() {
+            com.example.StockApplication.initializeFirebase(com.example.StockApplication.appContext)
+            return FirebaseAuth.getInstance()
+        }
     private val coroutineExceptionHandler = kotlinx.coroutines.CoroutineExceptionHandler { _, throwable ->
         Log.e("FirebaseSync", "Unhandled sync error caught safely", throwable)
     }

@@ -61,6 +61,10 @@ enum class AppScreen {
 
 class StockViewModel(application: Application) : AndroidViewModel(application) {
 
+    init {
+        com.example.StockApplication.initializeFirebase(application)
+    }
+
     private val database = AppDatabase.getDatabase(application)
     val repository = StockRepository(database)
     private val prefs = application.getSharedPreferences("mushaf_stock_prefs", Context.MODE_PRIVATE)
