@@ -41,6 +41,10 @@ class StockRepository(private val database: AppDatabase) {
         return syncManager.runComprehensiveDiagnostic()
     }
 
+    suspend fun clearAndVerifyItemsCollection(): String {
+        return syncManager.clearAndVerifyItemsCollection()
+    }
+
     fun ensureCollectionListenersActive() {
         syncManager.ensureCollectionListenersActive()
     }

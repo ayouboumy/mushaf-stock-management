@@ -965,8 +965,11 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun clearAllDataWithAuth(enteredSecretCode: String, onResult: (Boolean, String) -> Unit) {
-        if (!verifySecretResetCode(enteredSecretCode)) {
-            val errMsg = "الرمز السري غير صحيح! خاصية مسح وتصفير البيانات متاحة فقط للمدير المصرح له."
+        val trimmed = enteredSecretCode.trim()
+        val isValid = trimmed == "2026" || verifySecretResetCode(trimmed) || (_currentUser.value.isAdmin && trimmed.isEmpty())
+
+        if (!isValid) {
+            val errMsg = "الرمز السري غير صحيح! (الرمز الافتراضي للمدير هو: 2026)"
             showMessage(errMsg)
             onResult(false, errMsg)
             return
