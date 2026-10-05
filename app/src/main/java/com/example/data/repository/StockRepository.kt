@@ -88,7 +88,8 @@ class StockRepository(private val database: AppDatabase) {
                     }
                 }
 
-                val current = product.initialStock + totalIn - totalOut + totalAdj
+                val rawCurrent = product.initialStock + totalIn - totalOut + totalAdj
+                val current = maxOf(0, rawCurrent)
                 val status = when {
                     current <= 0 -> StockStatus.OUT_OF_STOCK
                     current <= product.minimumStock -> StockStatus.LOW_STOCK
@@ -139,7 +140,8 @@ class StockRepository(private val database: AppDatabase) {
                         }
                     }
 
-                    val current = variant.initialStock + totalIn - totalOut + totalAdj
+                    val rawCurrent = variant.initialStock + totalIn - totalOut + totalAdj
+                    val current = maxOf(0, rawCurrent)
                     val status = when {
                         current <= 0 -> StockStatus.OUT_OF_STOCK
                         current <= variant.minimumStock -> StockStatus.LOW_STOCK
@@ -691,19 +693,34 @@ class StockRepository(private val database: AppDatabase) {
 
     // Clear all data safely in child-to-parent order on IO dispatcher (local and cloud)
     suspend fun clearAllData(clearCloud: Boolean = true) = withContext(Dispatchers.IO) {
-        syncManager.stopListeners()
-        movementDao.clearAllMovements()
-        variantDao.clearAllVariants()
-        productDao.clearAllProducts()
-        destinationDao.clearAllDestinations()
-        auditLogDao.clearLogs()
-        if (clearCloud) {
-            try {
-                syncManager.clearAllCloudData()
-            } catch (e: Exception) {
-                android.util.Log.e("StockRepository", "clearAllCloudData error", e)
+        try {
+            syncManager.isClearingInProgress = true
+            syncManager.stopListeners()
+            // 1. Initial local wipe
+            movementDao.clearAllMovements()
+            variantDao.clearAllVariants()
+            productDao.clearAllProducts()
+            destinationDao.clearAllDestinations()
+            auditLogDao.clearLogs()
+
+            // 2. Cloud wipe if enabled
+            if (clearCloud) {
+                try {
+                    syncManager.clearAllCloudData()
+                } catch (e: Throwable) {
+                    android.util.Log.e("StockRepository", "clearAllCloudData error", e)
+                }
             }
+
+            // 3. Final local confirmation wipe so 0 records remain
+            movementDao.clearAllMovements()
+            variantDao.clearAllVariants()
+            productDao.clearAllProducts()
+            destinationDao.clearAllDestinations()
+            auditLogDao.clearLogs()
+        } finally {
+            syncManager.isClearingInProgress = false
+            syncManager.startRealtimeListeners()
         }
-        syncManager.startRealtimeListeners()
     }
 }

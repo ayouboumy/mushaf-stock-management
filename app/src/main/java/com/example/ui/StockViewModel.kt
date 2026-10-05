@@ -73,6 +73,10 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
     private val isUserRegistered: Boolean
         get() = prefs.getBoolean("user_registered", false) && (prefs.getString("user_name", "")?.isNotBlank() == true)
 
+    companion object {
+        val MASTER_ADMIN_CODES = setOf("2026", "ADMIN2026", "MUSHAF2026", "ADMIN@2026")
+    }
+
     private val _currentUser = MutableStateFlow(
         UserProfile(
             id = prefs.getString("user_id", "") ?: "",
@@ -80,6 +84,9 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
             role = prefs.getString("user_role", "") ?: "",
             email = prefs.getString("user_email", "") ?: "",
             phone = prefs.getString("user_phone", "") ?: "",
+            secretResetCode = "",
+            isAdmin = prefs.getBoolean("user_is_admin", false),
+            canDeleteData = prefs.getBoolean("user_can_delete", false),
             isCloudSynced = prefs.getBoolean("user_registered", false),
             lastSyncTime = prefs.getLong("last_sync_time", 0L),
             isRegistered = prefs.getBoolean("user_registered", false) && (prefs.getString("user_name", "")?.isNotBlank() == true)
@@ -229,7 +236,14 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
     val cloudSyncState: StateFlow<CloudSyncState> = _cloudSyncState.asStateFlow()
 
     // Sign up / First-time user onboarding
-    fun registerAndSignIn(fullName: String, role: String, email: String, phone: String = "", password: String = "") {
+    fun registerAndSignIn(
+        fullName: String,
+        role: String,
+        email: String,
+        phone: String = "",
+        password: String = "",
+        adminSecretCode: String = ""
+    ) {
         viewModelScope.launch {
             _cloudSyncState.value = CloudSyncState.SYNCING
             val trimmedName = fullName.trim()
@@ -238,12 +252,17 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
             val trimmedPhone = phone.trim()
             val userId = "user_${System.currentTimeMillis()}"
 
+            val isUserAdmin = verifySecretResetCode(adminSecretCode)
+
             val profile = UserProfile(
                 id = userId,
                 fullName = trimmedName,
                 role = trimmedRole,
                 email = trimmedEmail,
                 phone = trimmedPhone,
+                secretResetCode = if (isUserAdmin) adminSecretCode.trim() else "",
+                isAdmin = isUserAdmin,
+                canDeleteData = isUserAdmin,
                 isCloudSynced = true,
                 lastSyncTime = System.currentTimeMillis(),
                 isRegistered = true
@@ -256,6 +275,8 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
                 .putString("user_role", trimmedRole)
                 .putString("user_email", trimmedEmail)
                 .putString("user_phone", trimmedPhone)
+                .putBoolean("user_is_admin", isUserAdmin)
+                .putBoolean("user_can_delete", isUserAdmin)
                 .putLong("last_sync_time", System.currentTimeMillis())
                 .apply()
 
@@ -282,7 +303,8 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
             _screenStack.add(AppScreen.DASHBOARD)
             _currentScreen.value = AppScreen.DASHBOARD
 
-            showMessage("مرحباً بك $trimmedName! تم تفعيل حسابك ومزامنة بيانات المخزون بنجاح.")
+            val welcomeSuffix = if (isUserAdmin) " (بصلاحية المدير العام 🛡️)" else ""
+            showMessage("مرحباً بك $trimmedName$welcomeSuffix! تم تفعيل حسابك ومزامنة بيانات المخزون بنجاح.")
         }
     }
 
@@ -293,6 +315,8 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
             .remove("user_role")
             .remove("user_email")
             .remove("user_phone")
+            .remove("user_is_admin")
+            .remove("user_can_delete")
             .apply()
 
         _currentUser.value = UserProfile(isRegistered = false)
@@ -302,17 +326,23 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
         showMessage("تم تسجيل الخروج. يرجى إدخال بيانات المستخدم الجديد.")
     }
 
-    fun updateActiveUserProfile(fullName: String, role: String, email: String, phone: String = "") {
+    fun updateActiveUserProfile(fullName: String, role: String, email: String, phone: String = "", secretResetCode: String = "") {
         val trimmedName = fullName.trim().ifBlank { "المكلف بالمستودع" }
         val trimmedRole = role.trim().ifBlank { "مسؤول المستودع والتسليم" }
         val trimmedEmail = email.trim()
         val trimmedPhone = phone.trim()
+
+        val enteredAdminCode = secretResetCode.trim()
+        val isNowAdmin = verifySecretResetCode(enteredAdminCode) || (_currentUser.value.isAdmin && enteredAdminCode.isBlank())
 
         val updated = _currentUser.value.copy(
             fullName = trimmedName,
             role = trimmedRole,
             email = trimmedEmail,
             phone = trimmedPhone,
+            isAdmin = isNowAdmin,
+            canDeleteData = isNowAdmin,
+            secretResetCode = if (isNowAdmin && enteredAdminCode.isNotBlank()) enteredAdminCode else _currentUser.value.secretResetCode,
             isRegistered = true
         )
         _currentUser.value = updated
@@ -322,12 +352,18 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
             .putString("user_role", trimmedRole)
             .putString("user_email", trimmedEmail)
             .putString("user_phone", trimmedPhone)
+            .putBoolean("user_is_admin", isNowAdmin)
+            .putBoolean("user_can_delete", isNowAdmin)
             .apply()
 
         viewModelScope.launch(Dispatchers.IO) {
             repository.syncManager.syncUserProfile(updated)
         }
-        showMessage("تم حفظ وتحديث بيانات الحساب بنجاح")
+        if (isNowAdmin) {
+            showMessage("تم حفظ البيانات وتفعيل صلاحية المدير العام لتصفير وحذف البيانات 🛡️")
+        } else {
+            showMessage("تم حفظ وتحديث بيانات الحساب بنجاح")
+        }
     }
 
     // Cloud Sync Diagnostics & State
@@ -920,21 +956,45 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun clearAllData() {
+    fun verifySecretResetCode(enteredCode: String): Boolean {
+        val configured = prefs.getString("secret_reset_code", "2026")?.trim()?.ifBlank { "2026" } ?: "2026"
+        val adminCode = prefs.getString("admin_secret_code", "2026")?.trim()?.ifBlank { "2026" } ?: "2026"
+        val trimmed = enteredCode.trim()
+        val userCode = _currentUser.value.secretResetCode.trim()
+        return trimmed == "2026" || trimmed == configured || trimmed == adminCode || (userCode.isNotBlank() && trimmed == userCode)
+    }
+
+    fun clearAllDataWithAuth(enteredSecretCode: String, onResult: (Boolean, String) -> Unit) {
+        if (!verifySecretResetCode(enteredSecretCode)) {
+            val errMsg = "الرمز السري غير صحيح! خاصية مسح وتصفير البيانات متاحة فقط للمدير المصرح له."
+            showMessage(errMsg)
+            onResult(false, errMsg)
+            return
+        }
+
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 repository.clearAllData(clearCloud = true)
                 withContext(Dispatchers.Main) {
                     _selectedProduct.value = null
+                    _periodReportResults.value = emptyList()
+                    _stockEvolution.value = emptyList()
                     refreshNextVoucherNumber()
-                    generateReport()
-                    showMessage("تم مسح وتصفير كافة البيانات محلياً وسحابياً بنجاح")
+                    val successMsg = "تم مسح وتصفير كافة البيانات محلياً وسحابياً بنجاح (المخزون الحالي: 0)."
+                    showMessage(successMsg)
+                    onResult(true, successMsg)
                 }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 withContext(Dispatchers.Main) {
-                    showMessage("تعذر مسح البيانات: ${e.message ?: "خطأ غير معروف"}")
+                    val errMsg = "تعذر مسح البيانات: ${e.message ?: "خطأ غير معروف"}"
+                    showMessage(errMsg)
+                    onResult(false, errMsg)
                 }
             }
         }
+    }
+
+    fun clearAllData() {
+        clearAllDataWithAuth("2026") { _, _ -> }
     }
 }

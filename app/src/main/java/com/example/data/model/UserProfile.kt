@@ -6,6 +6,9 @@ data class UserProfile(
     val role: String = "",
     val email: String = "",
     val phone: String = "",
+    val secretResetCode: String = "",
+    val isAdmin: Boolean = false,
+    val canDeleteData: Boolean = false,
     val isCloudSynced: Boolean = false,
     val lastSyncTime: Long = 0L,
     val isRegistered: Boolean = false

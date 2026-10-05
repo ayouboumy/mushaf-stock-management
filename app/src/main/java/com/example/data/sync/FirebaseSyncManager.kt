@@ -56,6 +56,9 @@ data class FirestoreDiagnosticReport(
 
 class FirebaseSyncManager(private val database: AppDatabase) {
 
+    @Volatile
+    var isClearingInProgress = false
+
     private val firestore: FirebaseFirestore
         get() {
             com.example.StockApplication.initializeFirebase(com.example.StockApplication.appContext)
@@ -222,12 +225,14 @@ class FirebaseSyncManager(private val database: AppDatabase) {
     fun startRealtimeListeners() {
         scope.launch {
             try {
+                if (isClearingInProgress) return@launch
                 ensureAuth()
                 stopListeners()
 
                 // 1. Listen to Products
                 val prodListener = firestore.collection("products")
                     .addSnapshotListener { snapshot, error ->
+                        if (isClearingInProgress) return@addSnapshotListener
                         if (error != null) {
                             Log.e("FirebaseSync", "Products listen error: ${error.message}")
                             _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("products", false) }
@@ -237,10 +242,11 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                         }
                         _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("products", true) }
                         _syncDiagnostic.value = CloudSyncDiagnostic.Connected
-                        if (snapshot != null && !snapshot.isEmpty) {
+                        if (snapshot != null && !snapshot.isEmpty && !isClearingInProgress) {
                             scope.launch {
                                 try {
                                     for (doc in snapshot.documents) {
+                                        if (isClearingInProgress) return@launch
                                         val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
                                         val isActive = doc.getBoolean("active") ?: true
                                         if (isActive) {
@@ -275,6 +281,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 // 2. Listen to Product Variants
                 val variantListener = firestore.collection("variants")
                     .addSnapshotListener { snapshot, error ->
+                        if (isClearingInProgress) return@addSnapshotListener
                         if (error != null) {
                             Log.e("FirebaseSync", "Variants listen error: ${error.message}")
                             _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("variants", false) }
@@ -284,10 +291,11 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                         }
                         _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("variants", true) }
                         _syncDiagnostic.value = CloudSyncDiagnostic.Connected
-                        if (snapshot != null && !snapshot.isEmpty) {
+                        if (snapshot != null && !snapshot.isEmpty && !isClearingInProgress) {
                             scope.launch {
                                 try {
                                     for (doc in snapshot.documents) {
+                                        if (isClearingInProgress) return@launch
                                         val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
                                         val isActive = doc.getBoolean("active") ?: true
                                         if (isActive) {
@@ -321,6 +329,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 // 3. Listen to Stock Movements
                 val moveListener = firestore.collection("movements")
                     .addSnapshotListener { snapshot, error ->
+                        if (isClearingInProgress) return@addSnapshotListener
                         if (error != null) {
                             Log.e("FirebaseSync", "Movements listen error: ${error.message}")
                             _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("movements", false) }
@@ -330,10 +339,11 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                         }
                         _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("movements", true) }
                         _syncDiagnostic.value = CloudSyncDiagnostic.Connected
-                        if (snapshot != null && !snapshot.isEmpty) {
+                        if (snapshot != null && !snapshot.isEmpty && !isClearingInProgress) {
                             scope.launch {
                                 try {
                                     for (doc in snapshot.documents) {
+                                        if (isClearingInProgress) return@launch
                                         val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
                                         val isDel = doc.getBoolean("isDeleted") ?: false
                                         if (!isDel) {
@@ -376,6 +386,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 // 4. Listen to Destinations
                 val destListener = firestore.collection("destinations")
                     .addSnapshotListener { snapshot, error ->
+                        if (isClearingInProgress) return@addSnapshotListener
                         if (error != null) {
                             Log.e("FirebaseSync", "Destinations listen error: ${error.message}")
                             _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("destinations", false) }
@@ -385,10 +396,11 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                         }
                         _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("destinations", true) }
                         _syncDiagnostic.value = CloudSyncDiagnostic.Connected
-                        if (snapshot != null && !snapshot.isEmpty) {
+                        if (snapshot != null && !snapshot.isEmpty && !isClearingInProgress) {
                             scope.launch {
                                 try {
                                     for (doc in snapshot.documents) {
+                                        if (isClearingInProgress) return@launch
                                         val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
                                         val entity = DestinationEntity(
                                             id = id,
@@ -771,8 +783,10 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         try {
             val urlString = if (docId != null) {
                 "$restBaseUrl/$collection/$docId?key=$apiKey"
+            } else if (collection.contains("?")) {
+                "$restBaseUrl/$collection&key=$apiKey"
             } else {
-                "$restBaseUrl/$collection?key=$apiKey"
+                "$restBaseUrl/$collection?pageSize=300&key=$apiKey"
             }
             val url = java.net.URL(urlString)
             conn = url.openConnection() as java.net.HttpURLConnection
@@ -782,8 +796,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 conn.requestMethod = "POST"
                 conn.setRequestProperty("X-HTTP-Method-Override", "PATCH")
             } else if (method.equals("DELETE", ignoreCase = true)) {
-                conn.requestMethod = "POST"
-                conn.setRequestProperty("X-HTTP-Method-Override", "DELETE")
+                conn.requestMethod = "DELETE"
             } else {
                 conn.requestMethod = method
             }
@@ -920,6 +933,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
 
     // Push local data to Firestore (Dual Engine: SDK with timeout + REST fallback)
     suspend fun pushProduct(product: ProductEntity) = withContext(Dispatchers.IO) {
+        if (isClearingInProgress) return@withContext
         val sdkSuccess = try {
             withTimeoutOrNull(2500) {
                 ensureAuth()
@@ -943,7 +957,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         } catch (e: Exception) {
             false
         }
-        if (!sdkSuccess) {
+        if (!sdkSuccess && !isClearingInProgress) {
             makeRestRequest("PATCH", "products", product.id.toString(), buildProductJson(product))
         }
         _syncDiagnostic.value = CloudSyncDiagnostic.Connected
@@ -951,22 +965,23 @@ class FirebaseSyncManager(private val database: AppDatabase) {
     }
 
     suspend fun deleteProduct(productId: Long) = withContext(Dispatchers.IO) {
+        if (isClearingInProgress) return@withContext
         val sdkSuccess = try {
             withTimeoutOrNull(2500) {
                 ensureAuth()
-                firestore.collection("products").document(productId.toString()).update("active", false, "updatedAt", System.currentTimeMillis()).await()
+                firestore.collection("products").document(productId.toString()).delete().await()
                 true
             } ?: false
         } catch (e: Exception) {
             false
         }
         if (!sdkSuccess) {
-            val json = JSONObject().put("fields", JSONObject().put("active", JSONObject().put("booleanValue", false)).put("updatedAt", JSONObject().put("integerValue", System.currentTimeMillis().toString())))
-            makeRestRequest("PATCH", "products", productId.toString(), json.toString())
+            makeRestRequest("DELETE", "products", productId.toString(), null)
         }
     }
 
     suspend fun pushVariant(variant: ProductVariantEntity) = withContext(Dispatchers.IO) {
+        if (isClearingInProgress) return@withContext
         val sdkSuccess = try {
             withTimeoutOrNull(2500) {
                 ensureAuth()
@@ -989,7 +1004,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         } catch (e: Exception) {
             false
         }
-        if (!sdkSuccess) {
+        if (!sdkSuccess && !isClearingInProgress) {
             makeRestRequest("PATCH", "variants", variant.id.toString(), buildVariantJson(variant))
         }
         _syncDiagnostic.value = CloudSyncDiagnostic.Connected
@@ -997,22 +1012,23 @@ class FirebaseSyncManager(private val database: AppDatabase) {
     }
 
     suspend fun deleteVariant(variantId: Long) = withContext(Dispatchers.IO) {
+        if (isClearingInProgress) return@withContext
         val sdkSuccess = try {
             withTimeoutOrNull(2500) {
                 ensureAuth()
-                firestore.collection("variants").document(variantId.toString()).update("active", false, "updatedAt", System.currentTimeMillis()).await()
+                firestore.collection("variants").document(variantId.toString()).delete().await()
                 true
             } ?: false
         } catch (e: Exception) {
             false
         }
         if (!sdkSuccess) {
-            val json = JSONObject().put("fields", JSONObject().put("active", JSONObject().put("booleanValue", false)).put("updatedAt", JSONObject().put("integerValue", System.currentTimeMillis().toString())))
-            makeRestRequest("PATCH", "variants", variantId.toString(), json.toString())
+            makeRestRequest("DELETE", "variants", variantId.toString(), null)
         }
     }
 
     suspend fun pushMovement(movement: StockMovementEntity) = withContext(Dispatchers.IO) {
+        if (isClearingInProgress) return@withContext
         val sdkSuccess = try {
             withTimeoutOrNull(2500) {
                 ensureAuth()
@@ -1044,7 +1060,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         } catch (e: Exception) {
             false
         }
-        if (!sdkSuccess) {
+        if (!sdkSuccess && !isClearingInProgress) {
             makeRestRequest("PATCH", "movements", movement.id.toString(), buildMovementJson(movement))
         }
         _syncDiagnostic.value = CloudSyncDiagnostic.Connected
@@ -1052,6 +1068,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
     }
 
     suspend fun deleteMovement(movementId: Long) = withContext(Dispatchers.IO) {
+        if (isClearingInProgress) return@withContext
         val sdkSuccess = try {
             withTimeoutOrNull(2500) {
                 ensureAuth()
@@ -1067,6 +1084,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
     }
 
     suspend fun pushDestination(destination: DestinationEntity) = withContext(Dispatchers.IO) {
+        if (isClearingInProgress) return@withContext
         val sdkSuccess = try {
             withTimeoutOrNull(2500) {
                 ensureAuth()
@@ -1087,7 +1105,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         } catch (e: Exception) {
             false
         }
-        if (!sdkSuccess) {
+        if (!sdkSuccess && !isClearingInProgress) {
             makeRestRequest("PATCH", "destinations", destination.id.toString(), buildDestinationJson(destination))
         }
         _syncDiagnostic.value = CloudSyncDiagnostic.Connected
@@ -1095,6 +1113,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
     }
 
     suspend fun deleteDestination(destinationId: Long) = withContext(Dispatchers.IO) {
+        if (isClearingInProgress) return@withContext
         val sdkSuccess = try {
             withTimeoutOrNull(2500) {
                 ensureAuth()
@@ -1157,56 +1176,66 @@ class FirebaseSyncManager(private val database: AppDatabase) {
     }
 
     suspend fun clearAllCloudData() = withContext(Dispatchers.IO) {
-        val collections = listOf("products", "variants", "movements", "destinations", "_health_probes")
+        isClearingInProgress = true
         try {
-            ensureAuth()
-            // 1. SDK deletion
+            stopListeners()
+            val collections = listOf("products", "variants", "movements", "destinations", "_health_probes")
+
+            // 1. Comprehensive REST deletion for all documents in each collection
             for (col in collections) {
                 try {
-                    withTimeoutOrNull(2500) {
-                        val docs = firestore.collection(col).get().await()
-                        for (doc in docs.documents) {
-                            doc.reference.delete().await()
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.w("FirebaseSync", "SDK clear col $col notice: ${e.message}")
-                }
-            }
-        } catch (e: Exception) {
-            Log.w("FirebaseSync", "SDK clearAllCloudData notice: ${e.message}")
-        }
-
-        // 2. Comprehensive REST deletion for all documents in each collection
-        for (col in collections) {
-            try {
-                val jsonStr = makeRestRequest("GET", col, null, null)
-                if (jsonStr != null) {
-                    val json = JSONObject(jsonStr)
-                    val docs = json.optJSONArray("documents")
-                    if (docs != null) {
-                        for (i in 0 until docs.length()) {
-                            val doc = docs.getJSONObject(i)
-                            val name = doc.optString("name")
-                            val docId = name.substringAfterLast("/")
-                            if (docId.isNotBlank()) {
-                                makeRestRequest("DELETE", col, docId, null)
+                    val jsonStr = makeRestRequest("GET", col, null, null)
+                    if (jsonStr != null) {
+                        val json = JSONObject(jsonStr)
+                        val docs = json.optJSONArray("documents")
+                        if (docs != null) {
+                            for (i in 0 until docs.length()) {
+                                val doc = docs.getJSONObject(i)
+                                val name = doc.optString("name")
+                                val docId = name.substringAfterLast("/")
+                                if (docId.isNotBlank()) {
+                                    makeRestRequest("DELETE", col, docId, null)
+                                }
                             }
                         }
                     }
+                } catch (e: Throwable) {
+                    Log.e("FirebaseSync", "REST clear col $col error", e)
                 }
-            } catch (e: Exception) {
-                Log.e("FirebaseSync", "REST clear col $col error", e)
             }
-        }
 
-        _lastSyncTimestamp.value = System.currentTimeMillis()
-        _syncDiagnostic.value = CloudSyncDiagnostic.Connected
-        Log.d("FirebaseSync", "All cloud data cleared and deleted via SDK and REST")
+            // 2. SDK deletion fallback
+            try {
+                ensureAuth()
+                for (col in collections) {
+                    try {
+                        withTimeoutOrNull(2000) {
+                            val docs = firestore.collection(col).get().await()
+                            for (doc in docs.documents) {
+                                try {
+                                    doc.reference.delete().await()
+                                } catch (e: Throwable) {}
+                            }
+                        }
+                    } catch (e: Throwable) {
+                        Log.w("FirebaseSync", "SDK clear col $col notice: ${e.message}")
+                    }
+                }
+            } catch (e: Throwable) {
+                Log.w("FirebaseSync", "SDK clearAllCloudData notice: ${e.message}")
+            }
+
+            _lastSyncTimestamp.value = System.currentTimeMillis()
+            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+            Log.d("FirebaseSync", "All cloud data cleared and deleted via SDK and REST")
+        } finally {
+            isClearingInProgress = false
+        }
     }
 
     // Pull ALL collections via REST API (Ultra reliable)
     suspend fun pullAllFromRestApi(): Boolean = withContext(Dispatchers.IO) {
+        if (isClearingInProgress) return@withContext false
         try {
             // 1. Pull Products via REST
             val prodJsonStr = makeRestRequest("GET", "products", null, null)
@@ -1357,6 +1386,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
 
     // Full Bidirectional Sync with Instant Dual-Engine guarantees
     suspend fun fullBidirectionalSync(): Boolean = withContext(Dispatchers.IO) {
+        if (isClearingInProgress) return@withContext false
         _isSyncing.value = true
         _syncError.value = null
         try {
@@ -1407,6 +1437,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         scope.launch {
             while (true) {
                 delay(12000)
+                if (isClearingInProgress) continue
                 try {
                     fullBidirectionalSync()
                 } catch (e: Exception) {

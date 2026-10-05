@@ -355,6 +355,36 @@ fun SignUpOnboardingScreen(
                         )
                     )
 
+                    // Admin Secret Code Input (Optional, for delete/clear privilege)
+                    var adminCode by remember { mutableStateOf("") }
+                    var showAdminCode by remember { mutableStateOf(false) }
+                    OutlinedTextField(
+                        value = adminCode,
+                        onValueChange = { adminCode = it },
+                        label = { Text("رمز المدير العام (اختياري - لفتح صلاحية تصفير وحذف البيانات)", fontFamily = TajawalFontFamily, fontSize = 12.sp) },
+                        placeholder = { Text("•••• (اتركه فارغاً للمستخدم العادي)", fontFamily = TajawalFontFamily, fontSize = 11.5.sp, color = TextMuted) },
+                        leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = EmeraldPrimary) },
+                        trailingIcon = {
+                            IconButton(onClick = { showAdminCode = !showAdminCode }) {
+                                Icon(
+                                    imageVector = if (showAdminCode) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = null,
+                                    tint = TextMuted
+                                )
+                            }
+                        },
+                        visualTransformation = if (showAdminCode) VisualTransformation.None else PasswordVisualTransformation(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("signup_admin_code_input"),
+                        shape = RoundedCornerShape(12.dp),
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = EmeraldPrimary,
+                            unfocusedBorderColor = AppBorder
+                        )
+                    )
+
                     if (errorMessage != null) {
                         Text(
                             text = errorMessage!!,
@@ -418,7 +448,8 @@ fun SignUpOnboardingScreen(
                                 role = trimmedRole,
                                 email = trimmedEmail,
                                 phone = phone.trim(),
-                                password = password.trim()
+                                password = password.trim(),
+                                adminSecretCode = adminCode.trim()
                             )
                         },
                         modifier = Modifier

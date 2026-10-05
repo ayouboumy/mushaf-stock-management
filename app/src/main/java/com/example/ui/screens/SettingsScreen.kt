@@ -28,6 +28,8 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.LocationCity
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Rule
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -53,6 +55,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -364,41 +368,98 @@ fun SettingsScreen(
         )
     }
 
+    var secretCodeInput by remember { mutableStateOf("") }
+    var secretCodeError by remember { mutableStateOf<String?>(null) }
+    var showClearDataSecret by remember { mutableStateOf(false) }
+
     // Clear Data Dialog
     if (showClearDataDialog) {
         AlertDialog(
-            onDismissRequest = { showClearDataDialog = false },
+            onDismissRequest = {
+                showClearDataDialog = false
+                secretCodeInput = ""
+                secretCodeError = null
+                showClearDataSecret = false
+            },
             shape = RoundedCornerShape(14.dp),
             containerColor = AppSurface,
             title = {
-                Text(
-                    text = "مسح كافة البيانات",
-                    style = MaterialTheme.typography.titleMedium.copy(fontFamily = CairoFontFamily, fontWeight = FontWeight.Bold, color = StockEmpty)
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(imageVector = Icons.Default.DeleteForever, contentDescription = null, tint = StockEmpty, modifier = Modifier.size(22.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "مسح وتصفير كافة البيانات (محمي برمز سري)",
+                        style = MaterialTheme.typography.titleMedium.copy(fontFamily = CairoFontFamily, fontWeight = FontWeight.Bold, color = StockEmpty)
+                    )
+                }
             },
             text = {
-                Text(
-                    text = "سيتم حذف جميع الأصناف، الحركات، والوجهات بشكل نهائي. هل أنت متأكد؟",
-                    fontFamily = CairoFontFamily,
-                    fontSize = 12.5.sp,
-                    color = TextSecondary
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "سيتم حذف وتصفير جميع الأصناف، الحركات، والوجهات بشكل نهائي من الجهاز والسحابة (Firestore).\nلحماية البيانات، يرجى إدخال الرمز السري للمدير للتأكيد:",
+                        fontFamily = CairoFontFamily,
+                        fontSize = 12.5.sp,
+                        color = TextSecondary,
+                        lineHeight = 18.sp
+                    )
+
+                    OutlinedTextField(
+                        value = secretCodeInput,
+                        onValueChange = {
+                            secretCodeInput = it
+                            secretCodeError = null
+                        },
+                        label = { Text("الرمز السري للمدير", fontFamily = CairoFontFamily, fontSize = 12.sp) },
+                        placeholder = { Text("••••", fontFamily = CairoFontFamily) },
+                        trailingIcon = {
+                            IconButton(onClick = { showClearDataSecret = !showClearDataSecret }) {
+                                Icon(
+                                    imageVector = if (showClearDataSecret) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = null,
+                                    tint = TextMuted
+                                )
+                            }
+                        },
+                        visualTransformation = if (showClearDataSecret) VisualTransformation.None else PasswordVisualTransformation(),
+                        singleLine = true,
+                        isError = secretCodeError != null,
+                        supportingText = secretCodeError?.let { { Text(it, color = StockEmpty, fontFamily = CairoFontFamily, fontSize = 11.sp) } },
+                        modifier = Modifier.fillMaxWidth().testTag("input_secret_reset_code")
+                    )
+                }
             },
             confirmButton = {
                 Button(
                     onClick = {
-                        viewModel.clearAllData()
-                        showClearDataDialog = false
+                        viewModel.clearAllDataWithAuth(
+                            enteredSecretCode = secretCodeInput,
+                            onResult = { success, msg ->
+                                if (success) {
+                                    showClearDataDialog = false
+                                    secretCodeInput = ""
+                                    secretCodeError = null
+                                    showClearDataSecret = false
+                                } else {
+                                    secretCodeError = msg
+                                }
+                            }
+                        )
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = StockEmpty),
-                    shape = RoundedCornerShape(10.dp)
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.testTag("btn_confirm_clear_data")
                 ) {
-                    Text("تأكيد المسح", fontFamily = CairoFontFamily, fontWeight = FontWeight.Bold)
+                    Text("تأكيد المسح والتصفير", fontFamily = CairoFontFamily, fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
                 OutlinedButton(
-                    onClick = { showClearDataDialog = false },
+                    onClick = {
+                        showClearDataDialog = false
+                        secretCodeInput = ""
+                        secretCodeError = null
+                        showClearDataSecret = false
+                    },
                     shape = RoundedCornerShape(10.dp)
                 ) {
                     Text("تراجع", fontFamily = CairoFontFamily, color = TextSecondary)

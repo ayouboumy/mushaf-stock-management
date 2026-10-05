@@ -25,16 +25,20 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Login
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -51,6 +55,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -95,6 +101,8 @@ fun UserProfileScreen(
     var roleStr by remember(currentUser) { mutableStateOf(currentUser.role) }
     var emailStr by remember(currentUser) { mutableStateOf(currentUser.email) }
     var phoneStr by remember(currentUser) { mutableStateOf(currentUser.phone) }
+    var secretCodeStr by remember { mutableStateOf("") }
+    var showSecretCode by remember { mutableStateOf(false) }
 
     Column(
         modifier = modifier
@@ -280,10 +288,62 @@ fun UserProfileScreen(
                             colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = EmeraldPrimary, unfocusedBorderColor = AppBorder)
                         )
 
+                        if (currentUser.isAdmin) {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = EmeraldContainer,
+                                border = BorderStroke(1.dp, EmeraldPrimary)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(Icons.Default.Lock, contentDescription = null, tint = EmeraldPrimary, modifier = Modifier.size(18.dp))
+                                    Text(
+                                        text = "🛡️ حساب مدير عام (صلاحية تصفير وحذف البيانات مفعلة).",
+                                        fontSize = 12.sp,
+                                        color = EmeraldPrimary,
+                                        fontFamily = TajawalFontFamily,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        } else {
+                            Text(
+                                text = "🔒 حساب موظف عادي (صلاحية التصفير مقفلة). أدخل رمز المدير أدناه لترقية الحساب.",
+                                fontSize = 11.5.sp,
+                                color = TextSecondary,
+                                fontFamily = TajawalFontFamily
+                            )
+                        }
+
+                        OutlinedTextField(
+                            value = secretCodeStr,
+                            onValueChange = { secretCodeStr = it },
+                            label = { Text("رمز المدير العام (اختياري - لترقية الحساب وفتح التصفير)", fontFamily = TajawalFontFamily, fontSize = 12.sp) },
+                            placeholder = { Text("•••• (اتركه فارغاً إذا لم ترغب بالتغيير)", fontFamily = TajawalFontFamily) },
+                            leadingIcon = { Icon(imageVector = Icons.Default.Lock, contentDescription = null, tint = EmeraldPrimary) },
+                            trailingIcon = {
+                                IconButton(onClick = { showSecretCode = !showSecretCode }) {
+                                    Icon(
+                                        imageVector = if (showSecretCode) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                        contentDescription = null,
+                                        tint = TextMuted
+                                    )
+                                }
+                            },
+                            visualTransformation = if (showSecretCode) VisualTransformation.None else PasswordVisualTransformation(),
+                            modifier = Modifier.fillMaxWidth().testTag("user_secret_code_input"),
+                            shape = RoundedCornerShape(12.dp),
+                            textStyle = androidx.compose.ui.text.TextStyle(fontFamily = TajawalFontFamily, fontSize = 13.5.sp, color = TextPrimary),
+                            colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = EmeraldPrimary, unfocusedBorderColor = AppBorder)
+                        )
+
                         Button(
                             onClick = {
                                 if (nameStr.isNotBlank()) {
-                                    viewModel.updateActiveUserProfile(nameStr, roleStr, emailStr, phoneStr)
+                                    viewModel.updateActiveUserProfile(nameStr, roleStr, emailStr, phoneStr, secretCodeStr)
                                 }
                             },
                             modifier = Modifier.fillMaxWidth().height(46.dp).testTag("save_user_profile_btn"),
