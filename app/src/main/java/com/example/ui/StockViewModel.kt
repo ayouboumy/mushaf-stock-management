@@ -2,6 +2,7 @@ package com.example.ui
 
 import android.app.Application
 import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.db.AppDatabase
@@ -627,14 +628,49 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
         importValidatedRows.value = ExcelImportHelper.validateRows(rows)
     }
 
+    fun downloadExcelTemplate(context: Context) {
+        viewModelScope.launch {
+            try {
+                val file = ExcelImportHelper.generateExcelTemplate(context)
+                ReportExporter.shareFile(context, file, "text/csv", "تحميل نموذج استيراد المصاحف (إكسل)")
+                showMessage("تم إنشاء نموذج الإكسل بنجاح، يمكنك الآن فتحه وتعبئته")
+            } catch (e: Exception) {
+                showMessage("تعذر توليد النموذج: ${e.message}")
+            }
+        }
+    }
+
+    fun importFileFromUri(context: Context, uri: Uri) {
+        viewModelScope.launch {
+            try {
+                val inputStream = context.contentResolver.openInputStream(uri)
+                if (inputStream != null) {
+                    val rawText = inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    val cleanText = rawText.removePrefix("\uFEFF")
+                    parsePastedImportText(cleanText)
+                    if (importValidatedRows.value.isNotEmpty()) {
+                        showMessage("تمت قراءة ${importValidatedRows.value.size} سطر من الملف بنجاح")
+                        importCurrentStep.value = 3 // Jump directly to Preview & Validation!
+                    } else {
+                        showMessage("لم يتم العثور على أسطر صالحة في الملف، تأكد من الصيغة")
+                    }
+                } else {
+                    showMessage("تعذر الوصول إلى الملف المحدد")
+                }
+            } catch (e: Exception) {
+                showMessage("خطأ أثناء قراءة الملف: ${e.message}")
+            }
+        }
+    }
+
     fun executeImport() {
         viewModelScope.launch {
             val rows = importValidatedRows.value
             var imported = 0
             var skipped = 0
+            var newProductsCreated = 0
 
-            val targetProd = importTargetProductId.value ?: allProducts.value.firstOrNull()?.id ?: 1L
-            val targetVar = importTargetVariantId.value
+            val defaultProdId = importTargetProductId.value ?: allProducts.value.firstOrNull()?.id ?: 1L
 
             for (row in rows) {
                 if (row.status == com.example.utils.ImportRowStatus.INVALID) {
@@ -642,28 +678,95 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
                     continue
                 }
 
-                // If incomplete, we still preserve the record with fallback values as instructed in Section 17 & 32!
-                val dest = repository.getOrCreateDestination(row.parsedDestination, "أخرى")
-                repository.recordStockOut(
-                    productId = targetProd,
-                    variantId = targetVar,
-                    quantity = row.parsedQuantity,
-                    packageCount = row.parsedPackages,
-                    dateMillis = row.parsedDateMillis,
-                    dateFormatted = row.parsedDateFormatted,
-                    destinationId = dest.id,
-                    destinationName = row.parsedDestination,
-                    destinationType = dest.type,
-                    responsiblePerson = row.parsedResponsible,
-                    referenceNumber = "EXCEL-IMP-${row.rowIndex}",
-                    notes = "${row.parsedNotes} (استيراد من إكسل)",
-                    allowNegativeStock = true // Allow historical imported records
-                )
-                imported++
+                try {
+                    // 1. Determine or auto-create product by name
+                    val productId: Long = if (row.productName.isNotBlank()) {
+                        val existing = database.productDao().getProductByName(row.productName)
+                        if (existing != null) {
+                            existing.id
+                        } else {
+                            val newProd = repository.getOrCreateProduct(row.productName)
+                            newProductsCreated++
+                            newProd.id
+                        }
+                    } else {
+                        defaultProdId
+                    }
+
+                    // 2. Determine or auto-create variant
+                    val variantId: Long? = if (!row.variantName.isNullOrBlank()) {
+                        val existingVar = database.productVariantDao().getVariantByName(productId, row.variantName)
+                        if (existingVar != null) {
+                            existingVar.id
+                        } else {
+                            val varEntity = ProductVariantEntity(
+                                productId = productId,
+                                nameArabic = row.variantName,
+                                nameFrench = "",
+                                code = ""
+                            )
+                            val vId = database.productVariantDao().insertVariant(varEntity)
+                            repository.syncManager.pushVariant(varEntity.copy(id = vId))
+                            vId
+                        }
+                    } else {
+                        importTargetVariantId.value
+                    }
+
+                    // 3. Record movement based on movementType (وارد = STOCK_IN, توزيع = STOCK_OUT)
+                    if (row.movementType == "STOCK_IN") {
+                        repository.recordStockIn(
+                            productId = productId,
+                            variantId = variantId,
+                            quantity = row.parsedQuantity,
+                            packageCount = row.parsedPackages,
+                            dateMillis = row.parsedDateMillis,
+                            dateFormatted = row.parsedDateFormatted,
+                            source = row.parsedDestination.ifBlank { "مورد خارجي" },
+                            responsiblePerson = row.parsedResponsible.ifBlank { "أمين المستودع" },
+                            referenceNumber = row.parsedReference.ifBlank { "IMP-IN-${row.rowIndex}" },
+                            notes = "${row.parsedNotes} (استيراد إكسل)".trim()
+                        )
+                        imported++
+                    } else {
+                        val dest = repository.getOrCreateDestination(
+                            name = row.parsedDestination.ifBlank { "مسجد غير محدد" },
+                            type = "مسجد",
+                            address = row.parsedCommune
+                        )
+                        val (outId, _) = repository.recordStockOut(
+                            productId = productId,
+                            variantId = variantId,
+                            quantity = row.parsedQuantity,
+                            packageCount = row.parsedPackages,
+                            dateMillis = row.parsedDateMillis,
+                            dateFormatted = row.parsedDateFormatted,
+                            destinationId = dest.id,
+                            destinationName = dest.name,
+                            destinationType = dest.type,
+                            responsiblePerson = row.parsedResponsible.ifBlank { "المشرف على التوزيع" },
+                            referenceNumber = row.parsedReference.ifBlank { "IMP-OUT-${row.rowIndex}" },
+                            notes = "${row.parsedNotes} (استيراد إكسل)".trim(),
+                            allowNegativeStock = true // Batch import historical movements safely
+                        )
+                        if (outId > 0) {
+                            imported++
+                        } else {
+                            skipped++
+                        }
+                    }
+                } catch (e: Exception) {
+                    skipped++
+                }
             }
 
-            importResultSummary.value = "تم استيراد $imported حركة بنجاح. تم تخطي $skipped صفوف غير صالحة."
-            showMessage("اكتمل الاستيراد: $imported حركة مسجلة.")
+            val summaryMsg = buildString {
+                append("تم استيراد $imported حركة بنجاح")
+                if (newProductsCreated > 0) append(" (وإنشاء $newProductsCreated صنف جديد)")
+                if (skipped > 0) append(". تم تخطي $skipped صفوف غير صالحة.")
+            }
+            importResultSummary.value = summaryMsg
+            showMessage("اكتمل الاستيراد: $imported حركة مسجلة بنجاح.")
             importCurrentStep.value = 4
         }
     }
@@ -882,7 +985,68 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun exportReportPdf(context: Context) {
+    fun exportReportPdf(context: Context, template: String = "وضعية المخزون الشاملة") {
+        viewModelScope.launch {
+            val sdf = SimpleDateFormat("yyyy/MM/dd", Locale.getDefault())
+            val fromStr = sdf.format(Date(reportFromMillis.value))
+            val toStr = sdf.format(Date(reportToMillis.value))
+            val productsMap = allProducts.value.associate { it.id to it.nameArabic }
+            val variantsList = try { database.productVariantDao().getAllVariantsList() } catch (e: Exception) { emptyList() }
+            val variantsMap = variantsList.associate { it.id to it.nameArabic }
+            val allMovements = database.stockMovementDao().getAllActiveMovementsList()
+            val filteredMovements = allMovements.filter { m ->
+                m.dateMillis in reportFromMillis.value..reportToMillis.value
+            }
+
+            val file = when (template) {
+                "تقرير التوزيع للمساجد" -> {
+                    ReportExporter.generateDistributionReportPdf(
+                        context = context,
+                        orgName = _organizationName.value,
+                        deptName = _departmentName.value,
+                        startDateFormatted = fromStr,
+                        endDateFormatted = toStr,
+                        movements = filteredMovements,
+                        productsMap = productsMap,
+                        variantsMap = variantsMap
+                    )
+                }
+                "تقرير شحنات الوارد" -> {
+                    ReportExporter.generateIncomingReportPdf(
+                        context = context,
+                        orgName = _organizationName.value,
+                        deptName = _departmentName.value,
+                        startDateFormatted = fromStr,
+                        endDateFormatted = toStr,
+                        movements = filteredMovements,
+                        productsMap = productsMap,
+                        variantsMap = variantsMap
+                    )
+                }
+                else -> {
+                    val items = if (_periodReportResults.value.isNotEmpty()) _periodReportResults.value else {
+                        repository.generatePeriodReport(reportFromMillis.value, reportToMillis.value)
+                    }
+                    ReportExporter.generateStockReportPdf(
+                        context = context,
+                        orgName = _organizationName.value,
+                        deptName = _departmentName.value,
+                        startDateFormatted = fromStr,
+                        endDateFormatted = toStr,
+                        reportItems = items
+                    )
+                }
+            }
+            val title = when (template) {
+                "تقرير التوزيع للمساجد" -> "مشاركة تقرير توزيع المصاحف PDF"
+                "تقرير شحنات الوارد" -> "مشاركة تقرير شحنات الوارد PDF"
+                else -> "مشاركة تقرير وضعية المخزون PDF"
+            }
+            ReportExporter.shareFile(context, file, "application/pdf", title)
+        }
+    }
+
+    fun exportReportExcel(context: Context, template: String = "وضعية المخزون الشاملة") {
         viewModelScope.launch {
             val sdf = SimpleDateFormat("yyyy/MM/dd", Locale.getDefault())
             val fromStr = sdf.format(Date(reportFromMillis.value))
@@ -890,26 +1054,30 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
             val items = if (_periodReportResults.value.isNotEmpty()) _periodReportResults.value else {
                 repository.generatePeriodReport(reportFromMillis.value, reportToMillis.value)
             }
-            val file = ReportExporter.generateStockReportPdf(
+            val productsMap = allProducts.value.associate { it.id to it.nameArabic }
+            val variantsList = try { database.productVariantDao().getAllVariantsList() } catch (e: Exception) { emptyList() }
+            val variantsMap = variantsList.associate { it.id to it.nameArabic }
+            val allMovements = database.stockMovementDao().getAllActiveMovementsList()
+            val filteredMovements = allMovements.filter { m ->
+                m.dateMillis in reportFromMillis.value..reportToMillis.value
+            }
+
+            val file = ReportExporter.generateStockExcelCsv(
                 context = context,
-                orgName = _organizationName.value,
-                deptName = _departmentName.value,
+                reportItems = items,
+                movements = filteredMovements,
+                reportType = template,
                 startDateFormatted = fromStr,
                 endDateFormatted = toStr,
-                reportItems = items
+                productsMap = productsMap,
+                variantsMap = variantsMap
             )
-            ReportExporter.shareFile(context, file, "application/pdf", "مشاركة تقرير المخزون PDF")
-        }
-    }
-
-    fun exportReportExcel(context: Context) {
-        viewModelScope.launch {
-            val items = if (_periodReportResults.value.isNotEmpty()) _periodReportResults.value else {
-                repository.generatePeriodReport(reportFromMillis.value, reportToMillis.value)
+            val title = when (template) {
+                "تقرير التوزيع للمساجد" -> "تصدير تقرير التوزيع إلى إكسل"
+                "تقرير شحنات الوارد" -> "تصدير تقرير الوارد إلى إكسل"
+                else -> "تصدير وضعية المخزون إلى إكسل"
             }
-            val movements = database.stockMovementDao().getAllActiveMovementsList()
-            val file = ReportExporter.generateStockExcelCsv(context, items, movements)
-            ReportExporter.shareFile(context, file, "text/csv", "تصدير المخزون إلى إكسل")
+            ReportExporter.shareFile(context, file, "text/csv", title)
         }
     }
 

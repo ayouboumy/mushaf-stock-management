@@ -594,6 +594,22 @@ class StockRepository(private val database: AppDatabase) {
         return withId
     }
 
+    suspend fun getOrCreateProduct(name: String, category: String = "مصحف شريف", packageQuantity: Int = 1): ProductEntity {
+        val existing = productDao.getProductByName(name)
+        if (existing != null) return existing
+        val newProd = ProductEntity(
+            nameArabic = name,
+            category = category,
+            packageQuantity = packageQuantity,
+            unit = "نسخة",
+            active = true
+        )
+        val id = productDao.insertProduct(newProd)
+        val withId = newProd.copy(id = id)
+        syncManager.pushProduct(withId)
+        return withId
+    }
+
     suspend fun getNextVoucherSequenceNumber(): String {
         val movements = movementDao.getAllActiveMovementsList()
         val outMovements = movements.filter { it.movementType == "STOCK_OUT" }

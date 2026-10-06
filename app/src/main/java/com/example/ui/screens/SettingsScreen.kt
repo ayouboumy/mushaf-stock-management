@@ -22,12 +22,14 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.Business
+import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.LocationCity
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Rule
+import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
@@ -236,6 +238,42 @@ fun SettingsScreen(
                             title = "سجل التدقيق والمراقبة",
                             subtitle = "توثيق العمليات والمشرفين",
                             onClick = { viewModel.navigateTo(AppScreen.AUDIT_LOG_VIEW) }
+                        )
+                    }
+                }
+            }
+        }
+
+        // Section: استيراد وتصدير بيانات الإكسل
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "استيراد وتصدير الإكسل (Excel)",
+                    fontSize = 13.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary,
+                    fontFamily = CairoFontFamily
+                )
+
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    color = AppSurface,
+                    border = BorderStroke(1.dp, AppBorder)
+                ) {
+                    Column {
+                        SettingsRow(
+                            icon = Icons.Default.CloudDownload,
+                            title = "تحميل نموذج الإكسل المعتمد (.csv)",
+                            subtitle = "تنزيل نموذج فارغ لتعبئة شحنات التوريد والتوزيع",
+                            onClick = { viewModel.downloadExcelTemplate(context) }
+                        )
+                        HorizontalDivider(color = AppBorder, thickness = 0.8.dp)
+                        SettingsRow(
+                            icon = Icons.Default.UploadFile,
+                            title = "معالج استيراد بيانات الإكسل",
+                            subtitle = "رفع ملف إكسل معبأ لتسجيل الحركات وتحديث المخزون",
+                            onClick = { viewModel.navigateTo(AppScreen.EXCEL_IMPORT_WIZARD) }
                         )
                     }
                 }

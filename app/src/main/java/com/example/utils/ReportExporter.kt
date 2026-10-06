@@ -445,14 +445,27 @@ object ReportExporter {
     }
 
     /**
-     * Generates an Excel-compatible UTF-8 CSV file with BOM.
+     * Generates an Excel-compatible UTF-8 CSV file with BOM matching the selected report template.
+     */
+    /**
+     * Generates an Excel-compatible UTF-8 CSV file with BOM matching the selected report template.
      */
     fun generateStockExcelCsv(
         context: Context,
         reportItems: List<PeriodStockResult>,
-        movements: List<StockMovementEntity>
+        movements: List<StockMovementEntity>,
+        reportType: String = "وضعية المخزون الشاملة",
+        startDateFormatted: String = "",
+        endDateFormatted: String = "",
+        productsMap: Map<Long, String> = emptyMap(),
+        variantsMap: Map<Long, String> = emptyMap()
     ): File {
-        val file = File(context.cacheDir, "inventaire_mushaf_${System.currentTimeMillis()}.csv")
+        val filePrefix = when (reportType) {
+            "تقرير التوزيع للمساجد" -> "distribution_mosque"
+            "تقرير شحنات الوارد" -> "receptions_stock"
+            else -> "inventaire_stock"
+        }
+        val file = File(context.cacheDir, "${filePrefix}_${System.currentTimeMillis()}.csv")
         val fos = FileOutputStream(file)
 
         // Write UTF-8 BOM so Microsoft Excel recognizes Arabic correctly
@@ -460,31 +473,404 @@ object ReportExporter {
 
         val writer = fos.bufferedWriter(Charsets.UTF_8)
 
-        // Summary section
-        writer.write("ملخص وضعية المخزون\n")
-        writer.write("الصنف,النوع / اللغة,الرصيد الأولي,الوارد,الموزع,التعديلات,الرصيد النهائي\n")
-        for (item in reportItems) {
-            writer.write("\"${item.productName}\",\"${item.variantName}\",${item.openingStock},${item.incoming},${item.outgoing},${item.adjustments},${item.closingStock}\n")
-        }
+        when (reportType) {
+            "تقرير التوزيع للمساجد" -> {
+                writer.write("تقرير توزيع المصاحف على المساجد والمؤسسات المستفيدة\n")
+                if (startDateFormatted.isNotBlank() && endDateFormatted.isNotBlank()) {
+                    writer.write("الفترة المعتمدة: من $startDateFormatted إلى $endDateFormatted\n")
+                }
+                writer.write("\n")
+                writer.write("التاريخ,رقم السند / الحركة,اسم المسجد أو الوجهة,نوع الوجهة,الصنف,عدد الطرود,الكمية المسلمة (نسخ),المستلم / الإمام,رقم المرجع,ملاحظات\n")
 
-        writer.write("\n\n")
-        writer.write("سجل الحركات التفصيلي\n")
-        writer.write("التاريخ,رقم الحركة,النوع,الكمية,الطرود,الوجهة / المصدر,المسؤول,رقم المرجع,الملاحظات\n")
-
-        for (m in movements) {
-            val typeStr = when (m.movementType) {
-                "STOCK_IN" -> "إدخال (وارد)"
-                "STOCK_OUT" -> "إخراج (موزع)"
-                "ADJUSTMENT" -> "تعديل مخزون"
-                else -> m.movementType
+                val outMovements = movements.filter { it.movementType == "STOCK_OUT" }
+                var totalOutCopies = 0
+                var totalOutPkgs = 0
+                for (m in outMovements) {
+                    totalOutCopies += m.quantity
+                    totalOutPkgs += m.packageCount
+                    val notes = (m.reason + " " + m.notes).trim()
+                    val prodName = productsMap[m.productId] ?: "المصحف الشريف"
+                    val varName = m.variantId?.let { variantsMap[it] }
+                    val pName = if (!varName.isNullOrBlank()) "$prodName ($varName)" else prodName
+                    writer.write("\"${m.dateFormatted}\",\"${m.id}\",\"${m.destinationName}\",\"${m.destinationType}\",\"$pName\",${m.packageCount},${m.quantity},\"${m.responsiblePerson}\",\"${m.referenceNumber}\",\"$notes\"\n")
+                }
+                writer.write("\n")
+                writer.write("المجموع الإجمالي,,,,,${totalOutPkgs},${totalOutCopies},,,عدد المساجد والوجهات: ${outMovements.map { it.destinationName }.distinct().size}\n")
             }
-            val place = if (m.movementType == "STOCK_IN") m.source else m.destinationName
-            val notes = (m.reason + " " + m.notes).trim()
-            writer.write("\"${m.dateFormatted}\",${m.id},\"$typeStr\",${m.quantity},${m.packageCount},\"$place\",\"${m.responsiblePerson}\",\"${m.referenceNumber}\",\"$notes\"\n")
+
+            "تقرير شحنات الوارد" -> {
+                writer.write("تقرير شحنات الوارد وتوريد المصاحف للمستودع\n")
+                if (startDateFormatted.isNotBlank() && endDateFormatted.isNotBlank()) {
+                    writer.write("الفترة المعتمدة: من $startDateFormatted إلى $endDateFormatted\n")
+                }
+                writer.write("\n")
+                writer.write("التاريخ,رقم الشحنة,المصدر / المورد,الصنف,عدد الطرود,الكمية المستلمة (نسخ),المسؤول عن الاستلام,رقم السند,ملاحظات\n")
+
+                val inMovements = movements.filter { it.movementType == "STOCK_IN" }
+                var totalInCopies = 0
+                var totalInPkgs = 0
+                for (m in inMovements) {
+                    totalInCopies += m.quantity
+                    totalInPkgs += m.packageCount
+                    val notes = (m.reason + " " + m.notes).trim()
+                    val prodName = productsMap[m.productId] ?: "المصحف الشريف"
+                    val varName = m.variantId?.let { variantsMap[it] }
+                    val pName = if (!varName.isNullOrBlank()) "$prodName ($varName)" else prodName
+                    writer.write("\"${m.dateFormatted}\",\"${m.id}\",\"${m.source}\",\"$pName\",${m.packageCount},${m.quantity},\"${m.responsiblePerson}\",\"${m.referenceNumber}\",\"$notes\"\n")
+                }
+                writer.write("\n")
+                writer.write("المجموع الإجمالي,,,,${totalInPkgs},${totalInCopies},,,عدد الشحنات: ${inMovements.size}\n")
+            }
+
+            else -> {
+                // Summary section: وضعية المخزون الشاملة
+                writer.write("ملخص وضعية المخزون للفترة\n")
+                if (startDateFormatted.isNotBlank() && endDateFormatted.isNotBlank()) {
+                    writer.write("الفترة: من $startDateFormatted إلى $endDateFormatted\n")
+                }
+                writer.write("الصنف,النوع / اللغة,الرصيد الأولي,الوارد (+),الموزع (-),التعديلات,الرصيد النهائي\n")
+                for (item in reportItems) {
+                    writer.write("\"${item.productName}\",\"${item.variantName}\",${item.openingStock},${item.incoming},${item.outgoing},${item.adjustments},${item.closingStock}\n")
+                }
+
+                writer.write("\n\n")
+                writer.write("سجل الحركات التفصيلي الكامل\n")
+                writer.write("التاريخ,رقم الحركة,النوع,الصنف,الكمية,الطرود,الوجهة / المصدر,المسؤول,رقم المرجع,الملاحظات\n")
+
+                for (m in movements) {
+                    val typeStr = when (m.movementType) {
+                        "STOCK_IN" -> "إدخال (وارد)"
+                        "STOCK_OUT" -> "إخراج (موزع)"
+                        "ADJUSTMENT" -> "تعديل مخزون"
+                        else -> m.movementType
+                    }
+                    val place = if (m.movementType == "STOCK_IN") m.source else m.destinationName
+                    val prodName = productsMap[m.productId] ?: "المصحف الشريف"
+                    val varName = m.variantId?.let { variantsMap[it] }
+                    val pName = if (!varName.isNullOrBlank()) "$prodName ($varName)" else prodName
+                    val notes = (m.reason + " " + m.notes).trim()
+                    writer.write("\"${m.dateFormatted}\",${m.id},\"$typeStr\",\"$pName\",${m.quantity},${m.packageCount},\"$place\",\"${m.responsiblePerson}\",\"${m.referenceNumber}\",\"$notes\"\n")
+                }
+            }
         }
 
         writer.flush()
         writer.close()
+        return file
+    }
+
+    /**
+     * Generates a printable PDF distribution report to mosques.
+     */
+    fun generateDistributionReportPdf(
+        context: Context,
+        orgName: String,
+        deptName: String,
+        startDateFormatted: String,
+        endDateFormatted: String,
+        movements: List<StockMovementEntity>,
+        productsMap: Map<Long, String> = emptyMap(),
+        variantsMap: Map<Long, String> = emptyMap()
+    ): File {
+        val pdfDocument = PdfDocument()
+        val pageInfo = PdfDocument.PageInfo.Builder(595, 842, 1).create()
+        val page = pdfDocument.startPage(pageInfo)
+        val canvas: Canvas = page.canvas
+
+        val paint = Paint().apply {
+            isAntiAlias = true
+            color = Color.BLACK
+        }
+
+        // Header Background
+        paint.color = Color.rgb(15, 90, 62)
+        canvas.drawRect(0f, 0f, 595f, 90f, paint)
+
+        // Header Text
+        paint.color = Color.WHITE
+        paint.textSize = 14f
+        paint.isFakeBoldText = true
+        paint.textAlign = Paint.Align.CENTER
+        canvas.drawText(orgName, 297f, 32f, paint)
+
+        paint.textSize = 11f
+        paint.isFakeBoldText = false
+        canvas.drawText(deptName, 297f, 52f, paint)
+
+        paint.textSize = 13f
+        paint.isFakeBoldText = true
+        paint.color = Color.rgb(251, 228, 179)
+        canvas.drawText("تقرير توزيع المصاحف على المساجد والمؤسسات", 297f, 75f, paint)
+
+        // Dates
+        paint.color = Color.DKGRAY
+        paint.textSize = 10f
+        paint.textAlign = Paint.Align.RIGHT
+        canvas.drawText("الفترة: من $startDateFormatted إلى $endDateFormatted", 560f, 115f, paint)
+
+        paint.textAlign = Paint.Align.LEFT
+        val sdf = SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.getDefault())
+        canvas.drawText("تاريخ الاستخراج: ${sdf.format(Date())}", 35f, 115f, paint)
+
+        val outMovements = movements.filter { it.movementType == "STOCK_OUT" }
+        val totalCopies = outMovements.sumOf { it.quantity }
+        val totalPkgs = outMovements.sumOf { it.packageCount }
+        val mosqueCount = outMovements.map { it.destinationName }.distinct().size
+
+        // Summary Box
+        paint.color = Color.rgb(240, 247, 243)
+        canvas.drawRect(35f, 130f, 560f, 170f, paint)
+        paint.color = Color.rgb(15, 90, 62)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1f
+        canvas.drawRect(35f, 130f, 560f, 170f, paint)
+        paint.style = Paint.Style.FILL
+
+        paint.color = Color.BLACK
+        paint.textSize = 10f
+        paint.isFakeBoldText = true
+        paint.textAlign = Paint.Align.CENTER
+        canvas.drawText("إجمالي المصاحف الموزعة: %,d نسخة".format(totalCopies), 450f, 154f, paint)
+        canvas.drawText("عدد الطرود: %,d طرد".format(totalPkgs), 280f, 154f, paint)
+        canvas.drawText("المساجد والوجهات: %,d مستفيد".format(mosqueCount), 110f, 154f, paint)
+
+        // Table Header
+        val tableTop = 185f
+        paint.color = Color.rgb(220, 235, 227)
+        canvas.drawRect(35f, tableTop, 560f, tableTop + 24f, paint)
+        paint.color = Color.rgb(15, 90, 62)
+        paint.textSize = 9f
+        paint.isFakeBoldText = true
+
+        canvas.drawText("التاريخ", 520f, tableTop + 16f, paint)
+        canvas.drawText("المسجد / الوجهة المستفيدة", 390f, tableTop + 16f, paint)
+        canvas.drawText("الصنف", 260f, tableTop + 16f, paint)
+        canvas.drawText("الطرود", 175f, tableTop + 16f, paint)
+        canvas.drawText("الكمية (نسخ)", 115f, tableTop + 16f, paint)
+        canvas.drawText("المستلم", 55f, tableTop + 16f, paint)
+
+        var currentY = tableTop + 24f
+        paint.isFakeBoldText = false
+        paint.textSize = 8.5f
+
+        for ((index, m) in outMovements.withIndex()) {
+            if (currentY > 740f) break
+
+            if (index % 2 == 1) {
+                paint.color = Color.rgb(248, 250, 249)
+                canvas.drawRect(35f, currentY, 560f, currentY + 20f, paint)
+            }
+
+            paint.color = Color.rgb(220, 225, 222)
+            paint.strokeWidth = 0.5f
+            canvas.drawLine(35f, currentY + 20f, 560f, currentY + 20f, paint)
+
+            paint.color = Color.BLACK
+            canvas.drawText(m.dateFormatted, 520f, currentY + 14f, paint)
+
+            val destDisp = if (m.destinationName.length > 25) m.destinationName.take(24) + "…" else m.destinationName
+            canvas.drawText(destDisp, 390f, currentY + 14f, paint)
+
+            val prodName = productsMap[m.productId] ?: "المصحف الشريف"
+            val prodDisp = if (prodName.length > 18) prodName.take(17) + "…" else prodName
+            canvas.drawText(prodDisp, 260f, currentY + 14f, paint)
+
+            canvas.drawText("${m.packageCount}", 175f, currentY + 14f, paint)
+
+            paint.color = Color.rgb(220, 38, 38)
+            paint.isFakeBoldText = true
+            canvas.drawText("%,d".format(m.quantity), 115f, currentY + 14f, paint)
+            paint.isFakeBoldText = false
+
+            paint.color = Color.DKGRAY
+            val respDisp = if (m.responsiblePerson.length > 12) m.responsiblePerson.take(11) + "…" else m.responsiblePerson
+            canvas.drawText(respDisp, 55f, currentY + 14f, paint)
+
+            currentY += 20f
+        }
+
+        // Signatures area
+        val sigY = 760f
+        paint.color = Color.DKGRAY
+        paint.textSize = 9.5f
+        paint.isFakeBoldText = true
+        paint.textAlign = Paint.Align.RIGHT
+        canvas.drawText("توقيع وتأشيرة المكلف بالتوزيع:", 540f, sigY, paint)
+
+        paint.textAlign = Paint.Align.LEFT
+        canvas.drawText("تأشيرة رئيس المصلحة / المدير:", 50f, sigY, paint)
+
+        paint.color = Color.GRAY
+        paint.strokeWidth = 1f
+        paint.style = Paint.Style.STROKE
+        canvas.drawLine(370f, sigY + 30f, 540f, sigY + 30f, paint)
+        canvas.drawLine(50f, sigY + 30f, 220f, sigY + 30f, paint)
+
+        pdfDocument.finishPage(page)
+
+        val file = File(context.cacheDir, "rapport_distribution_${System.currentTimeMillis()}.pdf")
+        val outputStream = FileOutputStream(file)
+        pdfDocument.writeTo(outputStream)
+        outputStream.flush()
+        outputStream.close()
+        pdfDocument.close()
+        return file
+    }
+
+    /**
+     * Generates a printable PDF incoming stock shipments report.
+     */
+    fun generateIncomingReportPdf(
+        context: Context,
+        orgName: String,
+        deptName: String,
+        startDateFormatted: String,
+        endDateFormatted: String,
+        movements: List<StockMovementEntity>,
+        productsMap: Map<Long, String> = emptyMap(),
+        variantsMap: Map<Long, String> = emptyMap()
+    ): File {
+        val pdfDocument = PdfDocument()
+        val pageInfo = PdfDocument.PageInfo.Builder(595, 842, 1).create()
+        val page = pdfDocument.startPage(pageInfo)
+        val canvas: Canvas = page.canvas
+
+        val paint = Paint().apply {
+            isAntiAlias = true
+            color = Color.BLACK
+        }
+
+        // Header Background
+        paint.color = Color.rgb(15, 90, 62)
+        canvas.drawRect(0f, 0f, 595f, 90f, paint)
+
+        // Header Text
+        paint.color = Color.WHITE
+        paint.textSize = 14f
+        paint.isFakeBoldText = true
+        paint.textAlign = Paint.Align.CENTER
+        canvas.drawText(orgName, 297f, 32f, paint)
+
+        paint.textSize = 11f
+        paint.isFakeBoldText = false
+        canvas.drawText(deptName, 297f, 52f, paint)
+
+        paint.textSize = 13f
+        paint.isFakeBoldText = true
+        paint.color = Color.rgb(251, 228, 179)
+        canvas.drawText("تقرير شحنات الوارد وتوريد المصاحف للمستودع", 297f, 75f, paint)
+
+        // Dates
+        paint.color = Color.DKGRAY
+        paint.textSize = 10f
+        paint.textAlign = Paint.Align.RIGHT
+        canvas.drawText("الفترة: من $startDateFormatted إلى $endDateFormatted", 560f, 115f, paint)
+
+        paint.textAlign = Paint.Align.LEFT
+        val sdf = SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.getDefault())
+        canvas.drawText("تاريخ الاستخراج: ${sdf.format(Date())}", 35f, 115f, paint)
+
+        val inMovements = movements.filter { it.movementType == "STOCK_IN" }
+        val totalCopies = inMovements.sumOf { it.quantity }
+        val totalPkgs = inMovements.sumOf { it.packageCount }
+
+        // Summary Box
+        paint.color = Color.rgb(240, 247, 243)
+        canvas.drawRect(35f, 130f, 560f, 170f, paint)
+        paint.color = Color.rgb(15, 90, 62)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1f
+        canvas.drawRect(35f, 130f, 560f, 170f, paint)
+        paint.style = Paint.Style.FILL
+
+        paint.color = Color.BLACK
+        paint.textSize = 10f
+        paint.isFakeBoldText = true
+        paint.textAlign = Paint.Align.CENTER
+        canvas.drawText("إجمالي المصاحف المستلمة: %,d نسخة".format(totalCopies), 450f, 154f, paint)
+        canvas.drawText("عدد الطرود: %,d طرد".format(totalPkgs), 280f, 154f, paint)
+        canvas.drawText("عدد الشحنات والتوريدات: %,d شحنة".format(inMovements.size), 110f, 154f, paint)
+
+        // Table Header
+        val tableTop = 185f
+        paint.color = Color.rgb(220, 235, 227)
+        canvas.drawRect(35f, tableTop, 560f, tableTop + 24f, paint)
+        paint.color = Color.rgb(15, 90, 62)
+        paint.textSize = 9f
+        paint.isFakeBoldText = true
+
+        canvas.drawText("التاريخ", 520f, tableTop + 16f, paint)
+        canvas.drawText("المصدر / المطبعة / المورد", 390f, tableTop + 16f, paint)
+        canvas.drawText("الصنف المستلم", 260f, tableTop + 16f, paint)
+        canvas.drawText("الطرود", 175f, tableTop + 16f, paint)
+        canvas.drawText("الكمية (نسخ)", 115f, tableTop + 16f, paint)
+        canvas.drawText("المشرف", 55f, tableTop + 16f, paint)
+
+        var currentY = tableTop + 24f
+        paint.isFakeBoldText = false
+        paint.textSize = 8.5f
+
+        for ((index, m) in inMovements.withIndex()) {
+            if (currentY > 740f) break
+
+            if (index % 2 == 1) {
+                paint.color = Color.rgb(248, 250, 249)
+                canvas.drawRect(35f, currentY, 560f, currentY + 20f, paint)
+            }
+
+            paint.color = Color.rgb(220, 225, 222)
+            paint.strokeWidth = 0.5f
+            canvas.drawLine(35f, currentY + 20f, 560f, currentY + 20f, paint)
+
+            paint.color = Color.BLACK
+            canvas.drawText(m.dateFormatted, 520f, currentY + 14f, paint)
+
+            val srcDisp = if (m.source.length > 25) m.source.take(24) + "…" else m.source
+            canvas.drawText(srcDisp, 390f, currentY + 14f, paint)
+
+            val prodName = productsMap[m.productId] ?: "المصحف الشريف"
+            val prodDisp = if (prodName.length > 18) prodName.take(17) + "…" else prodName
+            canvas.drawText(prodDisp, 260f, currentY + 14f, paint)
+
+            canvas.drawText("${m.packageCount}", 175f, currentY + 14f, paint)
+
+            paint.color = Color.rgb(22, 163, 74)
+            paint.isFakeBoldText = true
+            canvas.drawText("+%,d".format(m.quantity), 115f, currentY + 14f, paint)
+            paint.isFakeBoldText = false
+
+            paint.color = Color.DKGRAY
+            val respDisp = if (m.responsiblePerson.length > 12) m.responsiblePerson.take(11) + "…" else m.responsiblePerson
+            canvas.drawText(respDisp, 55f, currentY + 14f, paint)
+
+            currentY += 20f
+        }
+
+        // Signatures area
+        val sigY = 760f
+        paint.color = Color.DKGRAY
+        paint.textSize = 9.5f
+        paint.isFakeBoldText = true
+        paint.textAlign = Paint.Align.RIGHT
+        canvas.drawText("توقيع وتأشيرة أمين المستودع:", 540f, sigY, paint)
+
+        paint.textAlign = Paint.Align.LEFT
+        canvas.drawText("تأشيرة رئيس المصلحة:", 50f, sigY, paint)
+
+        paint.color = Color.GRAY
+        paint.strokeWidth = 1f
+        paint.style = Paint.Style.STROKE
+        canvas.drawLine(370f, sigY + 30f, 540f, sigY + 30f, paint)
+        canvas.drawLine(50f, sigY + 30f, 220f, sigY + 30f, paint)
+
+        pdfDocument.finishPage(page)
+
+        val file = File(context.cacheDir, "rapport_receptions_${System.currentTimeMillis()}.pdf")
+        val outputStream = FileOutputStream(file)
+        pdfDocument.writeTo(outputStream)
+        outputStream.flush()
+        outputStream.close()
+        pdfDocument.close()
         return file
     }
 
