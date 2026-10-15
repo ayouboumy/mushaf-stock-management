@@ -65,17 +65,22 @@ jobs:
         run: |
           APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
           if [ -f "$APK" ]; then
-            echo "Verifying APK: $APK"
-            # Find build-tools directory containing apksigner and zipalign
+            echo "Processing APK: $APK"
             BUILD_TOOLS=$(find $ANDROID_HOME/build-tools -name "apksigner" 2>/dev/null | head -n 1)
             if [ -n "$BUILD_TOOLS" ]; then
               BUILD_TOOLS_DIR=$(dirname "$BUILD_TOOLS")
               echo "Using build-tools from: $BUILD_TOOLS_DIR"
+              # Ensure 4-byte zip alignment
               "$BUILD_TOOLS_DIR/zipalign" -c -v 4 "$APK" || {
-                echo "Re-aligning APK..."
+                echo "Aligning APK..."
                 "$BUILD_TOOLS_DIR/zipalign" -f -v 4 "$APK" "${APK}.aligned"
                 mv "${APK}.aligned" "$APK"
               }
+              # Re-sign with apksigner using debug.keystore ensuring both V1 and V2 are enabled
+              if [ -f "debug.keystore" ]; then
+                echo "Signing APK with apksigner..."
+                "$BUILD_TOOLS_DIR/apksigner" sign --ks debug.keystore --ks-pass pass:android --ks-key-alias androiddebugkey --key-pass pass:android --v1-signing-enabled true --v2-signing-enabled true "$APK"
+              fi
               "$BUILD_TOOLS_DIR/apksigner" verify --verbose "$APK" || true
             fi
           fi
