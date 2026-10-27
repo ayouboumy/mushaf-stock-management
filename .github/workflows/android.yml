@@ -76,10 +76,10 @@ jobs:
                 "$BUILD_TOOLS_DIR/zipalign" -f -v 4 "$APK" "${APK}.aligned"
                 mv "${APK}.aligned" "$APK"
               }
-              # Re-sign with apksigner using debug.keystore ensuring both V1 and V2 are enabled
+              # Re-sign with apksigner using debug.keystore ensuring V1 (JAR), V2, and V3 schemes are all enabled
               if [ -f "debug.keystore" ]; then
                 echo "Signing APK with apksigner..."
-                "$BUILD_TOOLS_DIR/apksigner" sign --ks debug.keystore --ks-pass pass:android --ks-key-alias androiddebugkey --key-pass pass:android --v1-signing-enabled true --v2-signing-enabled true "$APK"
+                "$BUILD_TOOLS_DIR/apksigner" sign --ks debug.keystore --ks-pass pass:android --ks-key-alias androiddebugkey --key-pass pass:android --min-sdk-version 21 --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true "$APK"
               fi
               "$BUILD_TOOLS_DIR/apksigner" verify --verbose "$APK" || true
             fi

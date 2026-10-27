@@ -18,6 +18,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CalendarToday
 import androidx.compose.material.icons.filled.Check
@@ -74,6 +79,14 @@ fun AddProductScreen(
 
     // 1. النوع (Type / Name)
     var productType by remember { mutableStateOf("") }
+
+    val allExistingProducts by viewModel.allProducts.collectAsStateWithLifecycle()
+    val matchingExistingProduct = remember(productType, allExistingProducts) {
+        val trimmed = productType.trim()
+        if (trimmed.length >= 2) {
+            allExistingProducts.find { it.active && it.nameArabic.trim().equals(trimmed, ignoreCase = true) }
+        } else null
+    }
 
     // 2. عدد الطرود (Number of packages)
     var packageCountStr by remember { mutableStateOf("") }
@@ -327,6 +340,52 @@ fun AddProductScreen(
                                         color = if (isSelected) EmeraldPrimary else TextPrimary,
                                         modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
                                     )
+                                }
+                            }
+                        }
+
+                        // Existing Item Detected Notice (Auto-Cumulation)
+                        if (matchingExistingProduct != null) {
+                            val existingProd = matchingExistingProduct
+                            val calculatedItems by viewModel.calculatedStockList.collectAsStateWithLifecycle()
+                            val curStock = calculatedItems.find { it.productId == existingProd.id }?.currentStock ?: existingProd.initialStock
+
+                            Surface(
+                                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                                shape = RoundedCornerShape(10.dp),
+                                color = EmeraldContainer.copy(alpha = 0.7f),
+                                border = BorderStroke(1.dp, EmeraldPrimary.copy(alpha = 0.4f))
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Layers,
+                                        contentDescription = null,
+                                        tint = EmeraldPrimary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        Text(
+                                            text = "هذا الصنف موجود بالفعل في المخزون",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = EmeraldPrimary,
+                                            fontFamily = TajawalFontFamily
+                                        )
+                                        Text(
+                                            text = "الرصيد الحالي: %,d نسخة. ستتم إضافة وتراكم (%,d نسخة) جديدة ليصبح الإجمالي: %,d نسخة.".format(
+                                                curStock,
+                                                totalMushafs,
+                                                curStock + totalMushafs
+                                            ),
+                                            fontSize = 11.sp,
+                                            color = TextPrimary,
+                                            fontFamily = TajawalFontFamily
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -614,7 +673,13 @@ fun AddProductScreen(
                             emptyList()
                         }
 
-                        viewModel.createProduct(product, variants)
+                        viewModel.createProduct(
+                            product = product,
+                            variants = variants,
+                            packageCount = pkgs,
+                            source = "إضافة صنف من شاشة الإضافة",
+                            notes = notesStr.trim()
+                        )
                     }
                 },
                 modifier = Modifier
@@ -625,11 +690,20 @@ fun AddProductScreen(
                 colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary),
                 shape = RoundedCornerShape(12.dp)
             ) {
-                Icon(imageVector = Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
+                Icon(
+                    imageVector = if (matchingExistingProduct != null) Icons.Default.Layers else Icons.Default.Check,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
                 Spacer(modifier = Modifier.width(6.dp))
+                val actionBtnLabel = if (matchingExistingProduct != null) {
+                    "ضم وتراكم الكمية (%,d نسخة) مع الصنف الحالي".format(totalMushafs)
+                } else {
+                    "حفظ وإدراج الصنف (%,d نسخة)".format(totalMushafs)
+                }
                 Text(
-                    text = "حفظ وإدراج الصنف (%,d نسخة)".format(totalMushafs),
-                    fontSize = 14.5.sp,
+                    text = actionBtnLabel,
+                    fontSize = 14.sp,
                     fontFamily = TajawalFontFamily,
                     fontWeight = FontWeight.Bold
                 )

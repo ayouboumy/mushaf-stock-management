@@ -22,12 +22,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoStories
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FloatingActionButton
@@ -370,24 +374,59 @@ fun ProductInventoryRow(
                     overflow = TextOverflow.Ellipsis
                 )
 
-                Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text(
-                        text = "%,d".format(stockItem.currentStock),
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = when (stockItem.status) {
-                            StockStatus.AVAILABLE -> TextPrimary
-                            StockStatus.LOW_STOCK -> StockLow
-                            StockStatus.OUT_OF_STOCK -> StockEmpty
-                        },
-                        fontFamily = CairoFontFamily
-                    )
-                    Text(
-                        text = stockItem.unit,
-                        fontSize = 11.sp,
-                        color = TextSecondary,
-                        fontFamily = CairoFontFamily
-                    )
+                // Right side: Current Stock + Dedicated 'تفاصيل' button
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            text = "%,d".format(stockItem.currentStock),
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = when (stockItem.status) {
+                                StockStatus.AVAILABLE -> TextPrimary
+                                StockStatus.LOW_STOCK -> StockLow
+                                StockStatus.OUT_OF_STOCK -> StockEmpty
+                            },
+                            fontFamily = CairoFontFamily
+                        )
+                        Text(
+                            text = stockItem.unit,
+                            fontSize = 11.sp,
+                            color = TextSecondary,
+                            fontFamily = CairoFontFamily
+                        )
+                    }
+
+                    // Explicit 'تفاصيل' (Details) button
+                    Surface(
+                        onClick = onClick,
+                        shape = RoundedCornerShape(8.dp),
+                        color = EmeraldContainer,
+                        border = BorderStroke(1.dp, EmeraldPrimary.copy(alpha = 0.25f)),
+                        modifier = Modifier.testTag("btn_item_detail_${stockItem.productId}")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Visibility,
+                                contentDescription = "تفاصيل الصنف",
+                                tint = EmeraldPrimary,
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Text(
+                                text = "تفاصيل",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = EmeraldPrimary,
+                                fontFamily = CairoFontFamily
+                            )
+                        }
+                    }
                 }
             }
 

@@ -20,8 +20,16 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.filled.CalendarToday
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Tag
+import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ReceiptLong
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Remove
@@ -361,16 +369,28 @@ fun ProductDetailScreen(
                 }
             }
 
-            // Movements List
+            // Movements List (When, How, Who details for every addition & subtraction)
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = "سجل العمليات الخاصة بهذا الصنف",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = TextPrimary,
-                        fontFamily = CairoFontFamily
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "سجل الإدخال والإخراج الخاص بهذا الصنف",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary,
+                            fontFamily = CairoFontFamily
+                        )
+                        Text(
+                            text = "${prodMovements.size} عملية مسجلة",
+                            fontSize = 11.5.sp,
+                            color = TextMuted,
+                            fontFamily = CairoFontFamily
+                        )
+                    }
 
                     Surface(
                         modifier = Modifier.fillMaxWidth(),
@@ -380,23 +400,43 @@ fun ProductDetailScreen(
                     ) {
                         Column(modifier = Modifier.padding(14.dp)) {
                             if (prodMovements.isEmpty()) {
-                                Text(
-                                    text = "لا توجد حركات مسجلة لهذا الصنف",
-                                    fontSize = 12.5.sp,
-                                    color = TextMuted,
-                                    fontFamily = CairoFontFamily,
-                                    modifier = Modifier.padding(vertical = 8.dp)
-                                )
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 16.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.History,
+                                        contentDescription = null,
+                                        tint = TextMuted,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                    Text(
+                                        text = "الرصيد التأسيسي الأولي: %,d نسخة".format(prod.initialStock),
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = TextPrimary,
+                                        fontFamily = CairoFontFamily
+                                    )
+                                    Text(
+                                        text = "لم يتم تسجيل أي عمليات إدخال أو صرف لاحقة بعد",
+                                        fontSize = 11.5.sp,
+                                        color = TextSecondary,
+                                        fontFamily = CairoFontFamily
+                                    )
+                                }
                             } else {
-                                prodMovements.take(6).forEachIndexed { index, m ->
+                                prodMovements.forEachIndexed { index, m ->
                                     if (index > 0) {
                                         HorizontalDivider(
                                             color = AppBorder,
                                             thickness = 0.8.dp,
-                                            modifier = Modifier.padding(vertical = 4.dp)
+                                            modifier = Modifier.padding(vertical = 6.dp)
                                         )
                                     }
-                                    MovementItemCard(
+                                    DetailedMovementItemRow(
                                         movement = m,
                                         onVoucherClick = { viewModel.showVoucher(m) }
                                     )
@@ -492,5 +532,193 @@ fun ProductDetailScreen(
                 }
             }
         )
+    }
+}
+
+/**
+ * Detailed Movement Item Row showing:
+ * - When (Date & Time)
+ * - How (Packages × Copies, or direct pieces)
+ * - Who (Responsible user / officer who made the addition or distribution)
+ * - Where / Source (Supplier or Destination)
+ * - Notes / Reference
+ */
+@Composable
+fun DetailedMovementItemRow(
+    movement: com.example.data.entity.StockMovementEntity,
+    onVoucherClick: (() -> Unit)? = null
+) {
+    val isIncoming = movement.movementType.contains("وارد") || movement.movementType.contains("IN")
+    val isOutgoing = movement.movementType.contains("صرف") || movement.movementType.contains("توزيع") || movement.movementType.contains("OUT")
+
+    val quantityColor = when {
+        isIncoming -> MovementInColor
+        isOutgoing -> MovementOutColor
+        else -> MovementAdjColor
+    }
+
+    val quantityPrefix = when {
+        isIncoming -> "+"
+        isOutgoing -> "−"
+        else -> if (movement.quantity > 0) "+" else ""
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        // Line 1: Type badge, main quantity, and Voucher action
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = quantityColor.copy(alpha = 0.12f)
+                ) {
+                    Text(
+                        text = when {
+                            isIncoming -> "إدخال وارد"
+                            isOutgoing -> "صرف وتوزيع"
+                            else -> "تسوية مخزون"
+                        },
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = quantityColor,
+                        fontFamily = CairoFontFamily,
+                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                    )
+                }
+
+                Text(
+                    text = movement.dateFormatted,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = TextPrimary,
+                    fontFamily = CairoFontFamily
+                )
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(
+                    text = "$quantityPrefix%,d نسخة".format(movement.quantity),
+                    fontSize = 14.5.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = quantityColor,
+                    fontFamily = CairoFontFamily
+                )
+
+                if (isOutgoing && onVoucherClick != null) {
+                    IconButton(
+                        onClick = onVoucherClick,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ReceiptLong,
+                            contentDescription = "معاينة السند",
+                            tint = TextSecondary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // Line 2: How & Where (How many packages, Source / Destination)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val placeText = when {
+                isIncoming -> "المصدر: ${movement.source.ifBlank { "شحنة واردة" }}"
+                isOutgoing -> "الجهة المستفيدة: ${movement.destinationName.ifBlank { "توزيع خارجي" }}"
+                else -> "سبب التسوية: ${movement.reason.ifBlank { "جرد دوري" }}"
+            }
+
+            Text(
+                text = placeText,
+                fontSize = 11.5.sp,
+                color = TextSecondary,
+                fontFamily = CairoFontFamily
+            )
+
+            if (movement.packageCount > 0) {
+                Text(
+                    text = "(${movement.packageCount} طرد)",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = TextMuted,
+                    fontFamily = CairoFontFamily
+                )
+            }
+        }
+
+        // Line 3: Who added it (المسؤول) & Reference / Notes
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val whoText = if (movement.responsiblePerson.isNotBlank()) {
+                "بواسطة: ${movement.responsiblePerson}"
+            } else {
+                "بواسطة: أمين المخزن"
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Person,
+                    contentDescription = null,
+                    tint = TextMuted,
+                    modifier = Modifier.size(12.dp)
+                )
+                Text(
+                    text = whoText,
+                    fontSize = 11.sp,
+                    color = TextMuted,
+                    fontFamily = CairoFontFamily
+                )
+            }
+
+            if (movement.referenceNumber.isNotBlank()) {
+                Text(
+                    text = "مرجع: #${movement.referenceNumber}",
+                    fontSize = 10.5.sp,
+                    color = TextMuted,
+                    fontFamily = CairoFontFamily
+                )
+            }
+        }
+
+        // Notes row if present
+        if (movement.notes.isNotBlank()) {
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = Color(0xFFF7F9F8),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "ملاحظة: ${movement.notes}",
+                    fontSize = 10.5.sp,
+                    color = TextSecondary,
+                    fontFamily = CairoFontFamily,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                )
+            }
+        }
     }
 }

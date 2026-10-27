@@ -960,11 +960,60 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun createProduct(product: ProductEntity, variants: List<ProductVariantEntity> = emptyList()) {
+    fun createProduct(
+        product: ProductEntity,
+        variants: List<ProductVariantEntity> = emptyList(),
+        packageCount: Int = 0,
+        source: String = "إضافة مخزون تراكمي",
+        notes: String = ""
+    ) {
         viewModelScope.launch {
-            repository.createProduct(product, variants)
-            showMessage("تم إنشاء الصنف الجديد بنجاح")
-            navigateBack()
+            val trimmedName = product.nameArabic.trim()
+            val existingProduct = database.productDao().getAllProductsList().find {
+                it.active && it.nameArabic.trim().equals(trimmedName, ignoreCase = true)
+            }
+
+            if (existingProduct != null) {
+                // Item exists: Cumulate / add quantity to the existing product!
+                val addedQuantity = product.initialStock
+                val now = System.currentTimeMillis()
+                val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+                val todayFormatted = sdf.format(Date(now))
+                val user = currentUser.value
+                val responsible = user.fullName.ifBlank { "أمين المخزن" }
+
+                // Record STOCK_IN movement so history shows exact when, how, and who
+                val effectiveSource = if (source.isNotBlank()) source else "إضافة تراكمية في المخزون"
+                val effectiveNotes = if (notes.isNotBlank()) notes else (product.notes.ifBlank { "إضافة كمية لنفس الصنف في المخزون" })
+
+                repository.recordStockIn(
+                    productId = existingProduct.id,
+                    variantId = null,
+                    quantity = addedQuantity,
+                    packageCount = packageCount,
+                    dateMillis = now,
+                    dateFormatted = todayFormatted,
+                    source = effectiveSource,
+                    responsiblePerson = responsible,
+                    referenceNumber = "CUMUL-${System.currentTimeMillis() % 100000}",
+                    notes = effectiveNotes
+                )
+
+                // Update product timestamp and optionally package quantity if it was updated
+                val updatedProd = existingProduct.copy(
+                    packageQuantity = if (product.packageQuantity > 0) product.packageQuantity else existingProduct.packageQuantity,
+                    updatedAt = now
+                )
+                repository.updateProduct(updatedProd)
+
+                showMessage("تم بنجاح ضم الكمية (%,d نسخة) وتراكمها مع الصنف الموجود «${existingProduct.nameArabic}»".format(addedQuantity))
+                navigateBack()
+            } else {
+                // New product creation
+                repository.createProduct(product, variants)
+                showMessage("تم إنشاء الصنف الجديد بنجاح")
+                navigateBack()
+            }
         }
     }
 
