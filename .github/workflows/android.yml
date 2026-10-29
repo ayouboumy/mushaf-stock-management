@@ -1,15 +1,17 @@
-name: Build Android APK
+name: Build & Release Android APK
 
 on:
   push:
     branches: [ "main", "master" ]
+    tags:
+      - 'v*'
   pull_request:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build Debug APK
+    name: Build & Sign Universal APK
     runs-on: ubuntu-latest
 
     steps:
@@ -26,19 +28,43 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Prepare Keystore & Environment
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD_SECRET: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS_SECRET: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD_SECRET: ${{ secrets.KEY_PASSWORD }}
         run: |
-          # 1. Decode debug keystore if base64 is provided, stripping any whitespace/newlines
-          if [ -f "debug.keystore.base64" ]; then
-            tr -d '\r\n ' < debug.keystore.base64 | base64 -d > debug.keystore 2>/dev/null || true
+          # 1. Check if persistent release keystore secret is provided
+          if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
+            echo "Using persistent release keystore from GitHub Secrets (RELEASE_KEYSTORE_BASE64)..."
+            echo "$RELEASE_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > release.keystore
+            echo "SIGNING_KEYSTORE=release.keystore" >> $GITHUB_ENV
+            echo "SIGNING_STORE_PASS=${KEYSTORE_PASSWORD_SECRET:-android}" >> $GITHUB_ENV
+            echo "SIGNING_KEY_ALIAS=${KEY_ALIAS_SECRET:-upload}" >> $GITHUB_ENV
+            echo "SIGNING_KEY_PASS=${KEY_PASSWORD_SECRET:-${KEYSTORE_PASSWORD_SECRET:-android}}" >> $GITHUB_ENV
+          elif [ -f "debug.keystore.base64" ]; then
+            echo "Using repository persistent debug.keystore.base64..."
+            tr -d '\r\n ' < debug.keystore.base64 | base64 -d > release.keystore
+            echo "SIGNING_KEYSTORE=release.keystore" >> $GITHUB_ENV
+            echo "SIGNING_STORE_PASS=android" >> $GITHUB_ENV
+            echo "SIGNING_KEY_ALIAS=androiddebugkey" >> $GITHUB_ENV
+            echo "SIGNING_KEY_PASS=android" >> $GITHUB_ENV
+          else
+            echo "Generating persistent release.keystore..."
+            keytool -genkeypair -v -keystore release.keystore \
+              -storepass android -alias upload -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=MushafStock,OU=App,O=MushafStock,C=MA"
+            echo "SIGNING_KEYSTORE=release.keystore" >> $GITHUB_ENV
+            echo "SIGNING_STORE_PASS=android" >> $GITHUB_ENV
+            echo "SIGNING_KEY_ALIAS=upload" >> $GITHUB_ENV
+            echo "SIGNING_KEY_PASS=android" >> $GITHUB_ENV
           fi
 
-          # 2. If debug.keystore is missing or empty, generate a valid debug keystore
-          if [ ! -s "debug.keystore" ]; then
-            echo "Generating debug.keystore with keytool..."
-            keytool -genkeypair -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-          fi
+          # Also keep debug.keystore present for Gradle debug build configuration
+          cp release.keystore debug.keystore || true
 
-          # 3. Create .env if missing to satisfy Secrets Gradle plugin
+          # 2. Setup .env file
           if [ ! -f ".env" ]; then
             if [ -f ".env.example" ]; then
               cp .env.example .env
@@ -47,10 +73,10 @@ jobs:
             fi
           fi
 
-          # 4. Make gradlew executable
+          # 3. Make gradlew executable
           chmod +x gradlew
 
-          # 5. Automatically accept Android SDK licenses using pre-installed Android SDK
+          # 4. Automatically accept Android SDK licenses
           if [ -n "$ANDROID_HOME" ] && [ -d "$ANDROID_HOME" ]; then
             mkdir -p "$ANDROID_HOME/licenses" || true
             echo -e "24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e\n2fa8c25502371fb36b476077a204003e3ddf45c4" > "$ANDROID_HOME/licenses/android-sdk-license" || true
@@ -58,38 +84,102 @@ jobs:
             yes | sdkmanager --licenses 2>/dev/null || yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses 2>/dev/null || true
           fi
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon --no-configuration-cache --stacktrace
-
-      - name: Verify and Align APK
+      - name: Build Android APK
+        env:
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+          KEYSTORE_PATH: release.keystore
+          KEYSTORE_PASSWORD: ${{ env.SIGNING_STORE_PASS }}
+          KEY_ALIAS: ${{ env.SIGNING_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ env.SIGNING_KEY_PASS }}
         run: |
-          APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
-          if [ -f "$APK" ]; then
-            echo "Processing APK: $APK"
-            BUILD_TOOLS=$(find $ANDROID_HOME/build-tools -name "apksigner" 2>/dev/null | head -n 1)
-            if [ -n "$BUILD_TOOLS" ]; then
-              BUILD_TOOLS_DIR=$(dirname "$BUILD_TOOLS")
-              echo "Using build-tools from: $BUILD_TOOLS_DIR"
-              # Ensure 4-byte zip alignment
-              "$BUILD_TOOLS_DIR/zipalign" -c -v 4 "$APK" || {
-                echo "Aligning APK..."
-                "$BUILD_TOOLS_DIR/zipalign" -f -v 4 "$APK" "${APK}.aligned"
-                mv "${APK}.aligned" "$APK"
-              }
-              # Re-sign with apksigner using debug.keystore ensuring V1 (JAR), V2, and V3 schemes are all enabled
-              if [ -f "debug.keystore" ]; then
-                echo "Signing APK with apksigner..."
-                "$BUILD_TOOLS_DIR/apksigner" sign --ks debug.keystore --ks-pass pass:android --ks-key-alias androiddebugkey --key-pass pass:android --min-sdk-version 21 --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true "$APK"
-              fi
-              "$BUILD_TOOLS_DIR/apksigner" verify --verbose "$APK" || true
-            fi
+          ./gradlew assembleDebug --no-daemon --no-configuration-cache --stacktrace
+
+      - name: Align and Sign Universal APK (V1, V2, V3 Schemes)
+        id: sign_apk
+        run: |
+          RAW_APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          if [ -z "$RAW_APK" ] || [ ! -f "$RAW_APK" ]; then
+            echo "Error: Could not find APK in app/build/outputs/apk/debug/"
+            exit 1
           fi
+
+          FINAL_APK="app/build/outputs/apk/debug/MushafStock-universal.apk"
+          echo "Found build output: $RAW_APK"
+
+          BUILD_TOOLS=$(find $ANDROID_HOME/build-tools -name "apksigner" 2>/dev/null | sort -V | tail -n 1)
+          if [ -z "$BUILD_TOOLS" ]; then
+            echo "Error: apksigner not found under $ANDROID_HOME/build-tools"
+            exit 1
+          fi
+          BUILD_TOOLS_DIR=$(dirname "$BUILD_TOOLS")
+          echo "Using Android Build Tools: $BUILD_TOOLS_DIR"
+
+          # 1. Ensure 4-byte zip alignment
+          echo "Running zipalign..."
+          "$BUILD_TOOLS_DIR/zipalign" -c -v 4 "$RAW_APK" || {
+            echo "Aligning APK to 4 bytes..."
+            "$BUILD_TOOLS_DIR/zipalign" -f -v 4 "$RAW_APK" "${RAW_APK}.aligned"
+            mv "${RAW_APK}.aligned" "$RAW_APK"
+          }
+
+          # 2. Re-sign with persistent keystore ensuring V1 (JAR), V2, and V3 schemes
+          echo "Signing APK with persistent keystore..."
+          "$BUILD_TOOLS_DIR/apksigner" sign \
+            --ks "$SIGNING_KEYSTORE" \
+            --ks-pass "pass:$SIGNING_STORE_PASS" \
+            --ks-key-alias "$SIGNING_KEY_ALIAS" \
+            --key-pass "pass:$SIGNING_KEY_PASS" \
+            --min-sdk-version 21 \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out "$FINAL_APK" \
+            "$RAW_APK"
+
+          echo "final_apk_path=$FINAL_APK" >> $GITHUB_OUTPUT
+
+      - name: Comprehensive APK Diagnostics
+        run: |
+          FINAL_APK="${{ steps.sign_apk.outputs.final_apk_path }}"
+          BUILD_TOOLS=$(find $ANDROID_HOME/build-tools -name "aapt2" 2>/dev/null | sort -V | tail -n 1)
+          BUILD_TOOLS_DIR=$(dirname "$BUILD_TOOLS")
+
+          echo "=========================================================="
+          echo "               APK DIAGNOSTICS REPORT                     "
+          echo "=========================================================="
+          echo "APK File: $FINAL_APK"
+          echo "File Size: $(du -h "$FINAL_APK" | cut -f1)"
+
+          echo -e "\n--- Package Badging & Identity ---"
+          if [ -f "$BUILD_TOOLS_DIR/aapt" ]; then
+            "$BUILD_TOOLS_DIR/aapt" dump badging "$FINAL_APK" | grep -E "package:|sdkVersion:|targetSdkVersion:|uses-feature:|native-code:" || true
+          else
+            "$BUILD_TOOLS_DIR/aapt2" dump badging "$FINAL_APK" | grep -E "package:|sdkVersion:|targetSdkVersion:|uses-feature:|native-code:" || true
+          fi
+
+          echo -e "\n--- Signature Verification & Schemes (V1, V2, V3) ---"
+          "$BUILD_TOOLS_DIR/apksigner" verify --verbose "$FINAL_APK"
+
+          echo -e "\n--- Certificate Details & SHA Fingerprints ---"
+          "$BUILD_TOOLS_DIR/apksigner" verify --print-certs "$FINAL_APK"
+          echo "=========================================================="
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: MushafStock-APK
-          path: app/build/outputs/apk/debug/*.apk
-          if-no-files-found: warn
+          name: MushafStock-Universal-APK
+          path: app/build/outputs/apk/debug/MushafStock-universal.apk
+          if-no-files-found: error
           retention-days: 30
+
+      - name: Create Release & Upload Asset (On Tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/build/outputs/apk/debug/MushafStock-universal.apk
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
