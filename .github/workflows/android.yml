@@ -105,14 +105,22 @@ jobs:
       - name: Align and Sign Universal APK (V1, V2, V3 Schemes)
         id: sign_apk
         run: |
-          RAW_APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          echo "Searching for built APKs..."
+          find . -name "*.apk" -type f || true
+
+          RAW_APK=$(find app/build/outputs/apk -name "*.apk" ! -name "*-unaligned.apk" ! -name "MushafStock-universal.apk" | head -n 1)
           if [ -z "$RAW_APK" ] || [ ! -f "$RAW_APK" ]; then
-            echo "Error: Could not find APK in app/build/outputs/apk/debug/"
+            RAW_APK=$(find . -name "*.apk" ! -name "*-unaligned.apk" ! -name "MushafStock-universal.apk" | head -n 1)
+          fi
+
+          if [ -z "$RAW_APK" ] || [ ! -f "$RAW_APK" ]; then
+            echo "Error: No built APK found in workspace!"
             exit 1
           fi
 
-          FINAL_APK="app/build/outputs/apk/debug/MushafStock-universal.apk"
           echo "Found build output: $RAW_APK"
+          OUTPUT_DIR="$(dirname "$RAW_APK")"
+          FINAL_APK="$OUTPUT_DIR/MushafStock-universal.apk"
 
           BUILD_TOOLS=$(find $ANDROID_HOME/build-tools -name "apksigner" 2>/dev/null | sort -V | tail -n 1)
           if [ -z "$BUILD_TOOLS" ]; then
@@ -123,7 +131,7 @@ jobs:
           echo "Using Android Build Tools: $BUILD_TOOLS_DIR"
 
           # 1. Ensure 4-byte zip alignment
-          echo "Running zipalign..."
+          echo "Checking zip alignment..."
           "$BUILD_TOOLS_DIR/zipalign" -c -v 4 "$RAW_APK" || {
             echo "Aligning APK to 4 bytes..."
             "$BUILD_TOOLS_DIR/zipalign" -f -v 4 "$RAW_APK" "${RAW_APK}.aligned"
@@ -131,7 +139,7 @@ jobs:
           }
 
           # 2. Re-sign with persistent keystore ensuring V1 (JAR), V2, and V3 schemes
-          echo "Signing APK with persistent keystore..."
+          echo "Signing APK with persistent keystore ($SIGNING_KEYSTORE, alias: $SIGNING_KEY_ALIAS)..."
           "$BUILD_TOOLS_DIR/apksigner" sign \
             --ks "$SIGNING_KEYSTORE" \
             --ks-pass "pass:$SIGNING_STORE_PASS" \
@@ -144,11 +152,18 @@ jobs:
             --out "$FINAL_APK" \
             "$RAW_APK"
 
+          # Create a copy in workspace root for easy and reliable artifact upload
+          mkdir -p build-artifacts
+          cp -f "$FINAL_APK" build-artifacts/MushafStock-universal.apk
+
+          echo "final_apk_path=$FINAL_APK" >> $GITHUB_ENV
           echo "final_apk_path=$FINAL_APK" >> $GITHUB_OUTPUT
+          echo "artifact_apk=build-artifacts/MushafStock-universal.apk" >> $GITHUB_ENV
 
       - name: Comprehensive APK Diagnostics
+        if: steps.sign_apk.outcome == 'success'
         run: |
-          FINAL_APK="${{ steps.sign_apk.outputs.final_apk_path }}"
+          FINAL_APK="${{ env.final_apk_path }}"
           BUILD_TOOLS=$(find $ANDROID_HOME/build-tools -name "aapt2" 2>/dev/null | sort -V | tail -n 1)
           BUILD_TOOLS_DIR=$(dirname "$BUILD_TOOLS")
 
@@ -174,18 +189,20 @@ jobs:
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
-        if: always()
+        if: success() || steps.sign_apk.outcome == 'success'
         with:
           name: MushafStock-Universal-APK
-          path: app/build/outputs/apk/debug/MushafStock-universal.apk
-          if-no-files-found: error
+          path: |
+            build-artifacts/MushafStock-universal.apk
+            app/build/outputs/apk/**/*.apk
+          if-no-files-found: warn
           retention-days: 30
 
       - name: Create Release & Upload Asset (On Tag)
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') && (success() || steps.sign_apk.outcome == 'success')
         uses: softprops/action-gh-release@v2
         with:
-          files: app/build/outputs/apk/debug/MushafStock-universal.apk
+          files: build-artifacts/MushafStock-universal.apk
           name: Release ${{ github.ref_name }}
           draft: false
           prerelease: false
