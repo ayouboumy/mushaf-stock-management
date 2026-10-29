@@ -27,13 +27,25 @@ android {
     }
   }
 
+  fun resolveKeystore(candidatePath: String?): File {
+    val pathsToTry = listOfNotNull(
+      candidatePath,
+      "${rootDir}/release.keystore",
+      "${rootDir}/debug.keystore",
+      "${projectDir}/debug.keystore",
+      "${rootDir}/my-upload-key.jks"
+    )
+    for (p in pathsToTry) {
+      val f = file(p)
+      if (f.exists() && f.length() > 0) return f
+    }
+    // Return standard rootDir/debug.keystore as final fallback
+    return file("${rootDir}/debug.keystore")
+  }
+
   signingConfigs {
     create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH")
-        ?: (if (file("${rootDir}/release.keystore").exists()) "${rootDir}/release.keystore"
-            else if (file("${rootDir}/my-upload-key.jks").exists()) "${rootDir}/my-upload-key.jks"
-            else "${rootDir}/debug.keystore")
-      storeFile = file(keystorePath)
+      storeFile = resolveKeystore(System.getenv("KEYSTORE_PATH"))
       storePassword = System.getenv("KEYSTORE_PASSWORD") ?: System.getenv("STORE_PASSWORD") ?: "android"
       keyAlias = System.getenv("KEY_ALIAS") ?: "upload"
       keyPassword = System.getenv("KEY_PASSWORD") ?: System.getenv("KEYSTORE_PASSWORD") ?: System.getenv("STORE_PASSWORD") ?: "android"
@@ -42,11 +54,7 @@ android {
       enableV3Signing = true
     }
     create("debugConfig") {
-      val keystorePath = System.getenv("KEYSTORE_PATH")
-        ?: (if (file("${rootDir}/debug.keystore").exists()) "${rootDir}/debug.keystore"
-            else if (file("${rootDir}/release.keystore").exists()) "${rootDir}/release.keystore"
-            else "${rootDir}/debug.keystore")
-      storeFile = file(keystorePath)
+      storeFile = resolveKeystore(System.getenv("KEYSTORE_PATH"))
       storePassword = System.getenv("KEYSTORE_PASSWORD") ?: System.getenv("STORE_PASSWORD") ?: "android"
       keyAlias = System.getenv("KEY_ALIAS") ?: "androiddebugkey"
       keyPassword = System.getenv("KEY_PASSWORD") ?: System.getenv("KEYSTORE_PASSWORD") ?: System.getenv("STORE_PASSWORD") ?: "android"
