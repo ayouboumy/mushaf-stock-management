@@ -42,10 +42,14 @@ android {
       enableV3Signing = true
     }
     create("debugConfig") {
-      storeFile = file("${rootDir}/debug.keystore")
-      storePassword = "android"
-      keyAlias = "androiddebugkey"
-      keyPassword = "android"
+      val keystorePath = System.getenv("KEYSTORE_PATH")
+        ?: (if (file("${rootDir}/debug.keystore").exists()) "${rootDir}/debug.keystore"
+            else if (file("${rootDir}/release.keystore").exists()) "${rootDir}/release.keystore"
+            else "${rootDir}/debug.keystore")
+      storeFile = file(keystorePath)
+      storePassword = System.getenv("KEYSTORE_PASSWORD") ?: System.getenv("STORE_PASSWORD") ?: "android"
+      keyAlias = System.getenv("KEY_ALIAS") ?: "androiddebugkey"
+      keyPassword = System.getenv("KEY_PASSWORD") ?: System.getenv("KEYSTORE_PASSWORD") ?: System.getenv("STORE_PASSWORD") ?: "android"
       enableV1Signing = true
       enableV2Signing = true
       enableV3Signing = true

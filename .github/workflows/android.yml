@@ -38,31 +38,39 @@ jobs:
           if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
             echo "Using persistent release keystore from GitHub Secrets (RELEASE_KEYSTORE_BASE64)..."
             echo "$RELEASE_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > release.keystore
+            STORE_PASS="${KEYSTORE_PASSWORD_SECRET:-android}"
+            KEY_ALIAS_VAL="${KEY_ALIAS_SECRET:-upload}"
+            KEY_PASS_VAL="${KEY_PASSWORD_SECRET:-${KEYSTORE_PASSWORD_SECRET:-android}}"
+
             echo "SIGNING_KEYSTORE=release.keystore" >> $GITHUB_ENV
-            echo "SIGNING_STORE_PASS=${KEYSTORE_PASSWORD_SECRET:-android}" >> $GITHUB_ENV
-            echo "SIGNING_KEY_ALIAS=${KEY_ALIAS_SECRET:-upload}" >> $GITHUB_ENV
-            echo "SIGNING_KEY_PASS=${KEY_PASSWORD_SECRET:-${KEYSTORE_PASSWORD_SECRET:-android}}" >> $GITHUB_ENV
+            echo "SIGNING_STORE_PASS=$STORE_PASS" >> $GITHUB_ENV
+            echo "SIGNING_KEY_ALIAS=$KEY_ALIAS_VAL" >> $GITHUB_ENV
+            echo "SIGNING_KEY_PASS=$KEY_PASS_VAL" >> $GITHUB_ENV
+
+            # If debug.keystore is missing or needed by Gradle, copy release.keystore
+            cp release.keystore debug.keystore || true
           elif [ -f "debug.keystore.base64" ]; then
             echo "Using repository persistent debug.keystore.base64..."
-            tr -d '\r\n ' < debug.keystore.base64 | base64 -d > release.keystore
-            echo "SIGNING_KEYSTORE=release.keystore" >> $GITHUB_ENV
+            tr -d '\r\n ' < debug.keystore.base64 | base64 -d > debug.keystore
+            cp debug.keystore release.keystore || true
+
+            echo "SIGNING_KEYSTORE=debug.keystore" >> $GITHUB_ENV
             echo "SIGNING_STORE_PASS=android" >> $GITHUB_ENV
             echo "SIGNING_KEY_ALIAS=androiddebugkey" >> $GITHUB_ENV
             echo "SIGNING_KEY_PASS=android" >> $GITHUB_ENV
           else
-            echo "Generating persistent release.keystore..."
-            keytool -genkeypair -v -keystore release.keystore \
-              -storepass android -alias upload -keypass android \
+            echo "Generating persistent debug.keystore with alias androiddebugkey..."
+            keytool -genkeypair -v -keystore debug.keystore \
+              -storepass android -alias androiddebugkey -keypass android \
               -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=MushafStock,OU=App,O=MushafStock,C=MA"
-            echo "SIGNING_KEYSTORE=release.keystore" >> $GITHUB_ENV
+              -dname "CN=Android Debug,O=Android,C=US"
+            cp debug.keystore release.keystore || true
+
+            echo "SIGNING_KEYSTORE=debug.keystore" >> $GITHUB_ENV
             echo "SIGNING_STORE_PASS=android" >> $GITHUB_ENV
-            echo "SIGNING_KEY_ALIAS=upload" >> $GITHUB_ENV
+            echo "SIGNING_KEY_ALIAS=androiddebugkey" >> $GITHUB_ENV
             echo "SIGNING_KEY_PASS=android" >> $GITHUB_ENV
           fi
-
-          # Also keep debug.keystore present for Gradle debug build configuration
-          cp release.keystore debug.keystore || true
 
           # 2. Setup .env file
           if [ ! -f ".env" ]; then
@@ -87,7 +95,7 @@ jobs:
       - name: Build Android APK
         env:
           GITHUB_RUN_NUMBER: ${{ github.run_number }}
-          KEYSTORE_PATH: release.keystore
+          KEYSTORE_PATH: ${{ env.SIGNING_KEYSTORE }}
           KEYSTORE_PASSWORD: ${{ env.SIGNING_STORE_PASS }}
           KEY_ALIAS: ${{ env.SIGNING_KEY_ALIAS }}
           KEY_PASSWORD: ${{ env.SIGNING_KEY_PASS }}
