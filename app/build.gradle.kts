@@ -14,8 +14,8 @@ android {
 
   defaultConfig {
     applicationId = "com.aistudio.mushafstock.app"
-    minSdk = 24
-    targetSdk = 36
+    minSdk = 23
+    targetSdk = 35
     val runNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0
     versionCode = if (runNumber > 0) 100 + runNumber else 2
     versionName = "1.0.1"
