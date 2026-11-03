@@ -213,6 +213,10 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                     }
                 }
                 syncUserProfile(profile)
+                if (auth.currentUser != null) {
+                    isPermissionDenied = false
+                    startRealtimeListeners()
+                }
                 true
             } catch (e: Exception) {
                 Log.e("FirebaseSync", "registerOrAuthUser error", e)
@@ -221,11 +225,32 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         }
     }
 
+    @Volatile
+    private var isPermissionDenied = false
+
+    private fun handleCollectionListenerError(collection: String, error: com.google.firebase.firestore.FirebaseFirestoreException) {
+        val msg = error.message ?: ""
+        val isPerm = msg.contains("PERMISSION_DENIED", ignoreCase = true) || msg.contains("Missing or insufficient permissions", ignoreCase = true)
+        _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put(collection, false) }
+        _syncDiagnostic.value = parseErrorToDiagnostic(error)
+        _syncError.value = error.message
+        if (isPerm) {
+            if (!isPermissionDenied) {
+                isPermissionDenied = true
+                Log.w("FirebaseSync", "Cloud Firestore requires authentication. Operating in local Room DB mode without network listener errors.")
+            }
+            stopListeners()
+        } else {
+            Log.w("FirebaseSync", "$collection listen error: ${error.message}")
+        }
+    }
+
     // Start Realtime Firestore Listeners to receive changes from other devices instantly
     fun startRealtimeListeners() {
         scope.launch {
             try {
                 if (isClearingInProgress) return@launch
+                if (isPermissionDenied && auth.currentUser == null) return@launch
                 ensureAuth()
                 stopListeners()
 
@@ -234,10 +259,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                     .addSnapshotListener { snapshot, error ->
                         if (isClearingInProgress) return@addSnapshotListener
                         if (error != null) {
-                            Log.e("FirebaseSync", "Products listen error: ${error.message}")
-                            _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("products", false) }
-                            _syncDiagnostic.value = parseErrorToDiagnostic(error)
-                            _syncError.value = error.message
+                            handleCollectionListenerError("products", error)
                             return@addSnapshotListener
                         }
                         _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("products", true) }
@@ -294,10 +316,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                     .addSnapshotListener { snapshot, error ->
                         if (isClearingInProgress) return@addSnapshotListener
                         if (error != null) {
-                            Log.e("FirebaseSync", "Variants listen error: ${error.message}")
-                            _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("variants", false) }
-                            _syncDiagnostic.value = parseErrorToDiagnostic(error)
-                            _syncError.value = error.message
+                            handleCollectionListenerError("variants", error)
                             return@addSnapshotListener
                         }
                         _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("variants", true) }
@@ -353,10 +372,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                     .addSnapshotListener { snapshot, error ->
                         if (isClearingInProgress) return@addSnapshotListener
                         if (error != null) {
-                            Log.e("FirebaseSync", "Movements listen error: ${error.message}")
-                            _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("movements", false) }
-                            _syncDiagnostic.value = parseErrorToDiagnostic(error)
-                            _syncError.value = error.message
+                            handleCollectionListenerError("movements", error)
                             return@addSnapshotListener
                         }
                         _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("movements", true) }
@@ -421,10 +437,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                     .addSnapshotListener { snapshot, error ->
                         if (isClearingInProgress) return@addSnapshotListener
                         if (error != null) {
-                            Log.e("FirebaseSync", "Destinations listen error: ${error.message}")
-                            _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("destinations", false) }
-                            _syncDiagnostic.value = parseErrorToDiagnostic(error)
-                            _syncError.value = error.message
+                            handleCollectionListenerError("destinations", error)
                             return@addSnapshotListener
                         }
                         _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("destinations", true) }
@@ -488,6 +501,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
 
     // Ensure collection listeners are active and registered
     fun ensureCollectionListenersActive() {
+        if (isPermissionDenied && auth.currentUser == null) return
         if (listeners.size < 4 || _activeListenersMap.value.values.any { !it }) {
             Log.i("FirestoreDiagnostic", "Re-initializing collection listeners (current: ${listeners.size})")
             startRealtimeListeners()
@@ -1586,18 +1600,28 @@ class FirebaseSyncManager(private val database: AppDatabase) {
             _syncError.value = null
             true
         } catch (e: Exception) {
-            val restPulled = pullAllFromRestApi()
-            if (restPulled) {
-                _lastSyncTimestamp.value = System.currentTimeMillis()
-                _syncDiagnostic.value = CloudSyncDiagnostic.Connected
-                _syncError.value = null
-                true
-            } else {
+            val msg = e.localizedMessage ?: e.message ?: ""
+            if (msg.contains("PERMISSION_DENIED", ignoreCase = true) || msg.contains("Missing or insufficient permissions", ignoreCase = true)) {
+                isPermissionDenied = true
                 val diag = parseErrorToDiagnostic(e)
                 _syncDiagnostic.value = diag
-                _syncError.value = e.localizedMessage ?: e.message
-                Log.e("FirebaseSync", "fullBidirectionalSync error", e)
+                _syncError.value = "قواعد الأمان السحابية تتطلب تسجيل الدخول. التطبيق يعمل محلياً."
+                Log.w("FirebaseSync", "Firestore rules require authentication; operating cleanly in local-first Room DB mode.")
                 false
+            } else {
+                val restPulled = pullAllFromRestApi()
+                if (restPulled) {
+                    _lastSyncTimestamp.value = System.currentTimeMillis()
+                    _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+                    _syncError.value = null
+                    true
+                } else {
+                    val diag = parseErrorToDiagnostic(e)
+                    _syncDiagnostic.value = diag
+                    _syncError.value = e.localizedMessage ?: e.message
+                    Log.w("FirebaseSync", "fullBidirectionalSync notice: ${e.message}")
+                    false
+                }
             }
         } finally {
             _isSyncing.value = false
@@ -1675,6 +1699,10 @@ class FirebaseSyncManager(private val database: AppDatabase) {
             while (true) {
                 delay(12000)
                 if (isClearingInProgress) continue
+                if (isPermissionDenied && auth.currentUser == null) {
+                    delay(30000)
+                    continue
+                }
                 try {
                     fullBidirectionalSync()
                 } catch (e: Exception) {
