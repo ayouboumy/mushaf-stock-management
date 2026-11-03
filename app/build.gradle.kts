@@ -17,7 +17,7 @@ android {
     minSdk = 23
     targetSdk = 35
     val runNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0
-    versionCode = if (runNumber > 0) 100 + runNumber else 2
+    versionCode = if (runNumber > 0) 1000 + runNumber else 1000
     versionName = "1.0.1"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -27,36 +27,39 @@ android {
     }
   }
 
-  fun resolveKeystore(candidatePath: String?): File {
+  fun resolveKeystore(candidatePath: String?, defaultName: String): File {
     val pathsToTry = listOfNotNull(
       candidatePath,
+      "${rootDir}/$defaultName",
+      "${projectDir}/$defaultName",
       "${rootDir}/release.keystore",
+      "${projectDir}/release.keystore",
       "${rootDir}/debug.keystore",
-      "${projectDir}/debug.keystore",
-      "${rootDir}/my-upload-key.jks"
+      "${projectDir}/debug.keystore"
     )
     for (p in pathsToTry) {
       val f = file(p)
       if (f.exists() && f.length() > 0) return f
     }
-    // Return standard rootDir/debug.keystore as final fallback
-    return file("${rootDir}/debug.keystore")
+    return file("${rootDir}/$defaultName")
   }
 
   signingConfigs {
     create("release") {
-      storeFile = resolveKeystore(System.getenv("KEYSTORE_PATH"))
+      val kFile = resolveKeystore(System.getenv("KEYSTORE_PATH"), "release.keystore")
+      storeFile = kFile
       storePassword = System.getenv("KEYSTORE_PASSWORD") ?: System.getenv("STORE_PASSWORD") ?: "android"
-      keyAlias = System.getenv("KEY_ALIAS") ?: "upload"
+      keyAlias = System.getenv("KEY_ALIAS") ?: (if (kFile.name.contains("debug")) "androiddebugkey" else "upload")
       keyPassword = System.getenv("KEY_PASSWORD") ?: System.getenv("KEYSTORE_PASSWORD") ?: System.getenv("STORE_PASSWORD") ?: "android"
       enableV1Signing = true
       enableV2Signing = true
       enableV3Signing = true
     }
     create("debugConfig") {
-      storeFile = resolveKeystore(System.getenv("KEYSTORE_PATH"))
+      val kFile = resolveKeystore(System.getenv("KEYSTORE_PATH"), "debug.keystore")
+      storeFile = kFile
       storePassword = System.getenv("KEYSTORE_PASSWORD") ?: System.getenv("STORE_PASSWORD") ?: "android"
-      keyAlias = System.getenv("KEY_ALIAS") ?: "androiddebugkey"
+      keyAlias = System.getenv("KEY_ALIAS") ?: (if (kFile.name.contains("release")) "upload" else "androiddebugkey")
       keyPassword = System.getenv("KEY_PASSWORD") ?: System.getenv("KEYSTORE_PASSWORD") ?: System.getenv("STORE_PASSWORD") ?: "android"
       enableV1Signing = true
       enableV2Signing = true
@@ -88,7 +91,7 @@ android {
   }
   packaging {
     jniLibs {
-      useLegacyPackaging = true
+      useLegacyPackaging = false
     }
   }
 }

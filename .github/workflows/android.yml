@@ -11,7 +11,7 @@ on:
 
 jobs:
   build:
-    name: Build & Sign Universal APK
+    name: Build & Sign Universal APK (Pixel & Universal Compatibility)
     runs-on: ubuntu-latest
 
     steps:
@@ -34,47 +34,49 @@ jobs:
           KEY_ALIAS_SECRET: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD_SECRET: ${{ secrets.KEY_PASSWORD }}
         run: |
-          # 1. Check if persistent release keystore secret is provided
+          mkdir -p app || true
+
+          # 1. Prepare Release Keystore
           if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
-            echo "Using persistent release keystore from GitHub Secrets (RELEASE_KEYSTORE_BASE64)..."
+            echo "Using custom release keystore from GitHub Secrets..."
             echo "$RELEASE_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > release.keystore
-            SELECTED_KEYSTORE="release.keystore"
             STORE_PASS="${KEYSTORE_PASSWORD_SECRET:-android}"
             KEY_ALIAS_VAL="${KEY_ALIAS_SECRET:-upload}"
             KEY_PASS_VAL="${KEY_PASSWORD_SECRET:-${KEYSTORE_PASSWORD_SECRET:-android}}"
-          elif [ -f "debug.keystore.base64" ]; then
-            echo "Using repository persistent debug.keystore.base64..."
-            tr -d '\r\n ' < debug.keystore.base64 | base64 -d > debug.keystore
-            SELECTED_KEYSTORE="debug.keystore"
+          elif [ -f "release.keystore.base64" ]; then
+            echo "Using repository persistent release.keystore.base64..."
+            tr -d '\r\n ' < release.keystore.base64 | base64 -d > release.keystore
             STORE_PASS="android"
-            KEY_ALIAS_VAL="androiddebugkey"
+            KEY_ALIAS_VAL="upload"
             KEY_PASS_VAL="android"
           else
-            echo "Generating persistent debug.keystore with alias androiddebugkey..."
-            keytool -genkeypair -v -keystore debug.keystore \
-              -storepass android -alias androiddebugkey -keypass android \
+            echo "Generating persistent release.keystore..."
+            keytool -genkeypair -v -keystore release.keystore \
+              -storepass android -alias upload -keypass android \
               -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-            SELECTED_KEYSTORE="debug.keystore"
+              -dname "CN=MushafStock,OU=App,O=MushafStock,C=MA" </dev/null
             STORE_PASS="android"
-            KEY_ALIAS_VAL="androiddebugkey"
+            KEY_ALIAS_VAL="upload"
             KEY_PASS_VAL="android"
           fi
 
-          # Ensure keystore is placed in both root and app/ directory
-          mkdir -p app || true
-          cp -f "$SELECTED_KEYSTORE" debug.keystore || true
-          cp -f "$SELECTED_KEYSTORE" release.keystore || true
-          cp -f "$SELECTED_KEYSTORE" app/debug.keystore || true
-          cp -f "$SELECTED_KEYSTORE" app/release.keystore || true
+          # 2. Prepare Debug Keystore
+          if [ -f "debug.keystore.base64" ]; then
+            tr -d '\r\n ' < debug.keystore.base64 | base64 -d > debug.keystore
+          elif [ ! -f "debug.keystore" ]; then
+            cp -f release.keystore debug.keystore
+          fi
 
-          ABSOLUTE_KEYSTORE_PATH="$(pwd)/$SELECTED_KEYSTORE"
-          echo "SIGNING_KEYSTORE=$ABSOLUTE_KEYSTORE_PATH" >> $GITHUB_ENV
+          # Copy both keystores to root and app/ directory for Gradle resolution
+          cp -f release.keystore app/release.keystore || true
+          cp -f debug.keystore app/debug.keystore || true
+
+          echo "SIGNING_KEYSTORE=$(pwd)/release.keystore" >> $GITHUB_ENV
           echo "SIGNING_STORE_PASS=$STORE_PASS" >> $GITHUB_ENV
           echo "SIGNING_KEY_ALIAS=$KEY_ALIAS_VAL" >> $GITHUB_ENV
           echo "SIGNING_KEY_PASS=$KEY_PASS_VAL" >> $GITHUB_ENV
 
-          # 2. Setup .env file
+          # 3. Setup .env file
           if [ ! -f ".env" ]; then
             if [ -f ".env.example" ]; then
               cp .env.example .env
@@ -83,10 +85,10 @@ jobs:
             fi
           fi
 
-          # 3. Make gradlew executable
+          # 4. Make gradlew executable
           chmod +x gradlew
 
-          # 4. Automatically accept Android SDK licenses
+          # 5. Automatically accept Android SDK licenses
           if [ -n "$ANDROID_HOME" ] && [ -d "$ANDROID_HOME" ]; then
             mkdir -p "$ANDROID_HOME/licenses" || true
             echo -e "24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e\n2fa8c25502371fb36b476077a204003e3ddf45c4" > "$ANDROID_HOME/licenses/android-sdk-license" || true
@@ -94,7 +96,7 @@ jobs:
             yes | sdkmanager --licenses 2>/dev/null || yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses 2>/dev/null || true
           fi
 
-      - name: Build Android APK
+      - name: Build Android APKs (Release & Debug)
         env:
           GITHUB_RUN_NUMBER: ${{ github.run_number }}
           KEYSTORE_PATH: ${{ env.SIGNING_KEYSTORE }}
@@ -102,27 +104,12 @@ jobs:
           KEY_ALIAS: ${{ env.SIGNING_KEY_ALIAS }}
           KEY_PASSWORD: ${{ env.SIGNING_KEY_PASS }}
         run: |
-          ./gradlew assembleDebug --no-daemon --no-configuration-cache --stacktrace
+          ./gradlew assembleRelease assembleDebug --no-daemon --no-configuration-cache --stacktrace
 
-      - name: Align and Sign Universal APK (V1, V2, V3 Schemes)
+      - name: Align and Sign Universal APKs (V1, V2, V3 Schemes with Page Alignment)
         id: sign_apk
         run: |
-          echo "Searching for built APKs..."
-          find . -name "*.apk" -type f || true
-
-          RAW_APK=$(find app/build/outputs/apk -name "*.apk" ! -name "*-unaligned.apk" ! -name "MushafStock-universal.apk" | head -n 1)
-          if [ -z "$RAW_APK" ] || [ ! -f "$RAW_APK" ]; then
-            RAW_APK=$(find . -name "*.apk" ! -name "*-unaligned.apk" ! -name "MushafStock-universal.apk" | head -n 1)
-          fi
-
-          if [ -z "$RAW_APK" ] || [ ! -f "$RAW_APK" ]; then
-            echo "Error: No built APK found in workspace!"
-            exit 1
-          fi
-
-          echo "Found build output: $RAW_APK"
-          OUTPUT_DIR="$(dirname "$RAW_APK")"
-          FINAL_APK="$OUTPUT_DIR/MushafStock-universal.apk"
+          mkdir -p build-artifacts
 
           BUILD_TOOLS=$(find $ANDROID_HOME/build-tools -name "apksigner" 2>/dev/null | sort -V | tail -n 1)
           if [ -z "$BUILD_TOOLS" ]; then
@@ -132,79 +119,95 @@ jobs:
           BUILD_TOOLS_DIR=$(dirname "$BUILD_TOOLS")
           echo "Using Android Build Tools: $BUILD_TOOLS_DIR"
 
-          # 1. Ensure 4-byte zip alignment
-          echo "Checking zip alignment..."
-          "$BUILD_TOOLS_DIR/zipalign" -c -v 4 "$RAW_APK" || {
-            echo "Aligning APK to 4 bytes..."
-            "$BUILD_TOOLS_DIR/zipalign" -f -v 4 "$RAW_APK" "${RAW_APK}.aligned"
-            mv "${RAW_APK}.aligned" "$RAW_APK"
-          }
+          # 1. Process Release APK
+          RAW_RELEASE=$(find app/build/outputs/apk/release -name "*.apk" ! -name "*-unaligned.apk" | head -n 1)
+          if [ -n "$RAW_RELEASE" ] && [ -f "$RAW_RELEASE" ]; then
+            echo "Found raw release APK: $RAW_RELEASE"
+            # Page-align uncompressed native libraries with -p for Google Pixel (Tensor G1/G2/G3/G4)
+            "$BUILD_TOOLS_DIR/zipalign" -p -f -v 4 "$RAW_RELEASE" "build-artifacts/MushafStock-release.apk" || cp -f "$RAW_RELEASE" "build-artifacts/MushafStock-release.apk"
 
-          # 2. Re-sign with persistent keystore ensuring V1 (JAR), V2, and V3 schemes
-          echo "Signing APK with persistent keystore ($SIGNING_KEYSTORE, alias: $SIGNING_KEY_ALIAS)..."
-          "$BUILD_TOOLS_DIR/apksigner" sign \
-            --ks "$SIGNING_KEYSTORE" \
-            --ks-pass "pass:$SIGNING_STORE_PASS" \
-            --ks-key-alias "$SIGNING_KEY_ALIAS" \
-            --key-pass "pass:$SIGNING_KEY_PASS" \
-            --min-sdk-version 21 \
-            --v1-signing-enabled true \
-            --v2-signing-enabled true \
-            --v3-signing-enabled true \
-            --out "$FINAL_APK" \
-            "$RAW_APK"
+            # Re-sign ensuring V1 (JAR), V2, and V3 schemes are active
+            "$BUILD_TOOLS_DIR/apksigner" sign \
+              --ks release.keystore \
+              --ks-pass "pass:$SIGNING_STORE_PASS" \
+              --ks-key-alias "$SIGNING_KEY_ALIAS" \
+              --key-pass "pass:$SIGNING_KEY_PASS" \
+              --min-sdk-version 23 \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              --v3-signing-enabled true \
+              "build-artifacts/MushafStock-release.apk"
 
-          # Create a copy in workspace root for easy and reliable artifact upload
-          mkdir -p build-artifacts
-          cp -f "$FINAL_APK" build-artifacts/MushafStock-universal.apk
+            # Create default universal alias
+            cp -f "build-artifacts/MushafStock-release.apk" "build-artifacts/MushafStock-universal.apk"
+          fi
 
-          echo "final_apk_path=$FINAL_APK" >> $GITHUB_ENV
-          echo "final_apk_path=$FINAL_APK" >> $GITHUB_OUTPUT
-          echo "artifact_apk=build-artifacts/MushafStock-universal.apk" >> $GITHUB_ENV
+          # 2. Process Debug APK
+          RAW_DEBUG=$(find app/build/outputs/apk/debug -name "*.apk" ! -name "*-unaligned.apk" | head -n 1)
+          if [ -n "$RAW_DEBUG" ] && [ -f "$RAW_DEBUG" ]; then
+            echo "Found raw debug APK: $RAW_DEBUG"
+            "$BUILD_TOOLS_DIR/zipalign" -p -f -v 4 "$RAW_DEBUG" "build-artifacts/MushafStock-debug.apk" || cp -f "$RAW_DEBUG" "build-artifacts/MushafStock-debug.apk"
+            "$BUILD_TOOLS_DIR/apksigner" sign \
+              --ks debug.keystore \
+              --ks-pass "pass:android" \
+              --ks-key-alias "androiddebugkey" \
+              --key-pass "pass:android" \
+              --min-sdk-version 23 \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              --v3-signing-enabled true \
+              "build-artifacts/MushafStock-debug.apk"
+          fi
 
       - name: Comprehensive APK Diagnostics
-        if: steps.sign_apk.outcome == 'success'
         run: |
-          FINAL_APK="${{ env.final_apk_path }}"
           BUILD_TOOLS=$(find $ANDROID_HOME/build-tools -name "aapt2" 2>/dev/null | sort -V | tail -n 1)
           BUILD_TOOLS_DIR=$(dirname "$BUILD_TOOLS")
 
-          echo "=========================================================="
-          echo "               APK DIAGNOSTICS REPORT                     "
-          echo "=========================================================="
-          echo "APK File: $FINAL_APK"
-          echo "File Size: $(du -h "$FINAL_APK" | cut -f1)"
+          for TARGET_APK in build-artifacts/MushafStock-release.apk build-artifacts/MushafStock-debug.apk; do
+            if [ -f "$TARGET_APK" ]; then
+              echo "=========================================================="
+              echo "             DIAGNOSTICS REPORT: $TARGET_APK              "
+              echo "=========================================================="
+              echo "File Size: $(du -h "$TARGET_APK" | cut -f1)"
 
-          echo -e "\n--- Package Badging & Identity ---"
-          if [ -f "$BUILD_TOOLS_DIR/aapt" ]; then
-            "$BUILD_TOOLS_DIR/aapt" dump badging "$FINAL_APK" | grep -E "package:|sdkVersion:|targetSdkVersion:|uses-feature:|native-code:" || true
-          else
-            "$BUILD_TOOLS_DIR/aapt2" dump badging "$FINAL_APK" | grep -E "package:|sdkVersion:|targetSdkVersion:|uses-feature:|native-code:" || true
-          fi
+              echo -e "\n--- Package Badging & Identity ---"
+              if [ -f "$BUILD_TOOLS_DIR/aapt" ]; then
+                "$BUILD_TOOLS_DIR/aapt" dump badging "$TARGET_APK" | grep -E "package:|sdkVersion:|targetSdkVersion:|uses-feature:|native-code:" || true
+              else
+                "$BUILD_TOOLS_DIR/aapt2" dump badging "$TARGET_APK" | grep -E "package:|sdkVersion:|targetSdkVersion:|uses-feature:|native-code:" || true
+              fi
 
-          echo -e "\n--- Signature Verification & Schemes (V1, V2, V3) ---"
-          "$BUILD_TOOLS_DIR/apksigner" verify --verbose "$FINAL_APK"
+              echo -e "\n--- Signature Verification & Schemes (V1, V2, V3) ---"
+              "$BUILD_TOOLS_DIR/apksigner" verify --verbose "$TARGET_APK"
 
-          echo -e "\n--- Certificate Details & SHA Fingerprints ---"
-          "$BUILD_TOOLS_DIR/apksigner" verify --print-certs "$FINAL_APK"
-          echo "=========================================================="
+              echo -e "\n--- Certificate Details & SHA Fingerprints ---"
+              "$BUILD_TOOLS_DIR/apksigner" verify --print-certs "$TARGET_APK"
+              echo "=========================================================="
+            fi
+          done
 
-      - name: Upload APK Artifact
+      - name: Upload APK Artifacts
         uses: actions/upload-artifact@v4
-        if: success() || steps.sign_apk.outcome == 'success'
+        if: always()
         with:
           name: MushafStock-Universal-APK
           path: |
+            build-artifacts/MushafStock-release.apk
+            build-artifacts/MushafStock-debug.apk
             build-artifacts/MushafStock-universal.apk
             app/build/outputs/apk/**/*.apk
           if-no-files-found: warn
           retention-days: 30
 
       - name: Create Release & Upload Asset (On Tag)
-        if: startsWith(github.ref, 'refs/tags/') && (success() || steps.sign_apk.outcome == 'success')
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: build-artifacts/MushafStock-universal.apk
+          files: |
+            build-artifacts/MushafStock-release.apk
+            build-artifacts/MushafStock-debug.apk
+            build-artifacts/MushafStock-universal.apk
           name: Release ${{ github.ref_name }}
           draft: false
           prerelease: false
