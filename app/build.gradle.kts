@@ -46,11 +46,11 @@ android {
 
   signingConfigs {
     create("release") {
-      val kFile = resolveKeystore(System.getenv("RELEASE_KEYSTORE_PATH") ?: System.getenv("KEYSTORE_PATH"), "release.keystore")
+      val kFile = resolveKeystore(System.getenv("ANDROID_KEYSTORE_PATH") ?: System.getenv("RELEASE_KEYSTORE_PATH") ?: System.getenv("KEYSTORE_PATH"), "release.keystore")
       storeFile = kFile
-      storePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD") ?: System.getenv("KEYSTORE_PASSWORD") ?: System.getenv("STORE_PASSWORD") ?: "android"
-      keyAlias = System.getenv("RELEASE_KEY_ALIAS") ?: System.getenv("KEY_ALIAS") ?: (if (kFile.name.contains("debug")) "androiddebugkey" else "upload")
-      keyPassword = System.getenv("RELEASE_KEY_PASSWORD") ?: System.getenv("KEY_PASSWORD") ?: System.getenv("RELEASE_KEYSTORE_PASSWORD") ?: System.getenv("KEYSTORE_PASSWORD") ?: System.getenv("STORE_PASSWORD") ?: "android"
+      storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: System.getenv("RELEASE_KEYSTORE_PASSWORD") ?: System.getenv("KEYSTORE_PASSWORD") ?: System.getenv("STORE_PASSWORD") ?: "android"
+      keyAlias = System.getenv("ANDROID_KEY_ALIAS") ?: System.getenv("RELEASE_KEY_ALIAS") ?: System.getenv("KEY_ALIAS") ?: (if (kFile.name.contains("debug")) "androiddebugkey" else "upload")
+      keyPassword = System.getenv("ANDROID_KEY_PASSWORD") ?: System.getenv("RELEASE_KEY_PASSWORD") ?: System.getenv("KEY_PASSWORD") ?: storePassword
       enableV1Signing = true
       enableV2Signing = true
       enableV3Signing = true
