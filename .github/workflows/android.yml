@@ -38,6 +38,7 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           KEY_PASSWORD_SECRET: ${{ secrets.KEY_PASSWORD }}
         run: |
+          set -e
           mkdir -p app || true
 
           # 1. Prepare Persistent Release Keystore
@@ -55,15 +56,18 @@ jobs:
           elif [ -f "release.keystore" ]; then
             echo "Using existing release.keystore file..."
           else
-            echo "Generating persistent release.keystore..."
-            keytool -genkeypair -v -keystore release.keystore \
-              -storepass android -alias upload -keypass android \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=MushafStock,OU=App,O=MushafStock,C=MA" </dev/null
-            STORE_PASS="android"
-            KEY_ALIAS_VAL="upload"
-            KEY_PASS_VAL="android"
+            echo "::error::CRITICAL: No persistent release keystore found! To prevent breaking existing app installations with mismatched signing keys, you must configure ANDROID_KEYSTORE_BASE64 in GitHub Secrets or include release.keystore.base64 in the repository. Ephemeral key generation is blocked."
+            exit 1
           fi
+
+          # Extract expected SHA-256 certificate fingerprint from release.keystore
+          EXPECTED_SHA256=$(keytool -list -v -keystore release.keystore -storepass "$STORE_PASS" -alias "$KEY_ALIAS_VAL" | grep "SHA256:" | head -n 1 | awk '{print $2}' | tr -d ' :' | tr '[:lower:]' '[:upper:]')
+          if [ -z "$EXPECTED_SHA256" ]; then
+            echo "::error::Failed to read certificate from release.keystore with alias '$KEY_ALIAS_VAL'!"
+            exit 1
+          fi
+          echo "EXPECTED_CERT_SHA256=$EXPECTED_SHA256" >> $GITHUB_ENV
+          echo "Expected Keystore Certificate SHA-256: $EXPECTED_SHA256"
 
           # 2. Prepare Guaranteed Debug Keystore (Alias: androiddebugkey)
           if [ -f "debug.keystore.base64" ]; then
@@ -142,15 +146,24 @@ jobs:
           fi
           echo "Found raw release APK: $RAW_RELEASE"
 
-          # Copy to primary standardized universal filename and aliases
-          cp -f "$RAW_RELEASE" "build-artifacts/MushafStock-v1.0.1-universal-release.apk"
-          cp -f "$RAW_RELEASE" "build-artifacts/MushafStock-release.apk"
+          # Extract version dynamically from APK metadata
+          VERSION_NAME=$("$BUILD_TOOLS_DIR/aapt2" dump badging "$RAW_RELEASE" | grep "versionName=" | head -n 1 | sed -E "s/.*versionName='([^']+)'.*/\1/")
+          if [ -z "$VERSION_NAME" ]; then
+            VERSION_NAME="1.0.1"
+          fi
+          echo "APP_VERSION_NAME=$VERSION_NAME" >> $GITHUB_ENV
+          echo "Discovered App Version Name: $VERSION_NAME"
+
+          FINAL_RELEASE_APK="build-artifacts/MushafStock-${VERSION_NAME}-release.apk"
+          echo "FINAL_RELEASE_APK_PATH=$FINAL_RELEASE_APK" >> $GITHUB_ENV
+
+          cp -f "$RAW_RELEASE" "$FINAL_RELEASE_APK"
           cp -f "$RAW_RELEASE" "build-artifacts/MushafStock-universal.apk"
 
           # Verify if already valid and signed by Gradle
-          if ! "$BUILD_TOOLS_DIR/apksigner" verify "build-artifacts/MushafStock-v1.0.1-universal-release.apk" >/dev/null 2>&1; then
+          if ! "$BUILD_TOOLS_DIR/apksigner" verify "$FINAL_RELEASE_APK" >/dev/null 2>&1; then
             echo "Re-aligning and re-signing universal release APK..."
-            "$BUILD_TOOLS_DIR/zipalign" -p -f 4 "$RAW_RELEASE" "build-artifacts/MushafStock-v1.0.1-universal-release.apk"
+            "$BUILD_TOOLS_DIR/zipalign" -p -f 4 "$RAW_RELEASE" "$FINAL_RELEASE_APK"
             "$BUILD_TOOLS_DIR/apksigner" sign \
               --ks release.keystore \
               --ks-pass "pass:$RELEASE_STORE_PASS" \
@@ -160,13 +173,12 @@ jobs:
               --v1-signing-enabled true \
               --v2-signing-enabled true \
               --v3-signing-enabled true \
-              "build-artifacts/MushafStock-v1.0.1-universal-release.apk"
-            cp -f "build-artifacts/MushafStock-v1.0.1-universal-release.apk" "build-artifacts/MushafStock-release.apk"
-            cp -f "build-artifacts/MushafStock-v1.0.1-universal-release.apk" "build-artifacts/MushafStock-universal.apk"
+              "$FINAL_RELEASE_APK"
+            cp -f "$FINAL_RELEASE_APK" "build-artifacts/MushafStock-universal.apk"
           fi
 
           # Calculate SHA-256 checksum
-          sha256sum "build-artifacts/MushafStock-v1.0.1-universal-release.apk" | tee "build-artifacts/MushafStock-v1.0.1-universal-release.apk.sha256"
+          sha256sum "$FINAL_RELEASE_APK" | tee "${FINAL_RELEASE_APK}.sha256"
 
           # 2. Process Debug APK
           RAW_DEBUG=$(find app/build/outputs/apk/debug -name "*.apk" ! -name "*-unaligned.apk" | head -n 1)
@@ -190,23 +202,22 @@ jobs:
             fi
           fi
 
-      - name: Strict APK Verification & Comprehensive Diagnostics
+      - name: Strict APK Verification & Certificate Fingerprint Match
         run: |
           set -e
           BUILD_TOOLS=$(find ${ANDROID_HOME:-/opt/android/sdk} -name "aapt2" 2>/dev/null | sort -V | tail -n 1)
           BUILD_TOOLS_DIR=$(dirname "$BUILD_TOOLS")
 
-          TARGET_APK="build-artifacts/MushafStock-v1.0.1-universal-release.apk"
-          if [ ! -f "$TARGET_APK" ]; then
-            echo "FATAL: $TARGET_APK not found!"
-            exit 1
+          TARGET_APK="${{ env.FINAL_RELEASE_APK_PATH }}"
+          if [ -z "$TARGET_APK" ] || [ ! -f "$TARGET_APK" ]; then
+            TARGET_APK=$(find build-artifacts -name "MushafStock-*-release.apk" | head -n 1)
           fi
 
           echo "=========================================================="
           echo "         STRICT VERIFICATION: $TARGET_APK                 "
           echo "=========================================================="
           echo "File Size: $(du -h "$TARGET_APK" | cut -f1)"
-          echo "SHA-256:   $(cat build-artifacts/MushafStock-v1.0.1-universal-release.apk.sha256)"
+          echo "SHA-256:   $(cat ${TARGET_APK}.sha256)"
 
           echo -e "\n--- Package Badging & Identity ---"
           if [ -f "$BUILD_TOOLS_DIR/aapt" ]; then
@@ -219,20 +230,27 @@ jobs:
           "$BUILD_TOOLS_DIR/zipalign" -c -v 4 "$TARGET_APK" | tail -n 3
 
           echo -e "\n--- Signature Verification & Schemes (V1, V2, V3) ---"
-          # This command must succeed with exit code 0 or workflow will fail
           "$BUILD_TOOLS_DIR/apksigner" verify --verbose "$TARGET_APK"
 
-          echo -e "\n--- Certificate Details & SHA Fingerprints ---"
-          "$BUILD_TOOLS_DIR/apksigner" verify --print-certs "$TARGET_APK" | grep -E "Signer|digest" || true
+          echo -e "\n--- Certificate Fingerprint Comparison (Release Identity) ---"
+          ACTUAL_SHA256=$("$BUILD_TOOLS_DIR/apksigner" verify --print-certs "$TARGET_APK" | grep "SHA-256 digest:" | head -n 1 | awk '{print $NF}' | tr -d ' :' | tr '[:lower:]' '[:upper:]')
+          echo "Expected Keystore Certificate SHA-256: ${{ env.EXPECTED_CERT_SHA256 }}"
+          echo "Actual APK Signature Certificate SHA-256: $ACTUAL_SHA256"
+
+          if [ "$ACTUAL_SHA256" != "${{ env.EXPECTED_CERT_SHA256 }}" ]; then
+            echo "::error::CRITICAL MISMATCH: APK certificate ($ACTUAL_SHA256) does not match expected permanent release certificate (${{ env.EXPECTED_CERT_SHA256 }})!"
+            exit 1
+          fi
+          echo "✓ Permanent release signing certificate verified successfully!"
           echo "=========================================================="
 
       - name: Upload Universal Release APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MushafStock-v1.0.1-universal-release
+          name: MushafStock-${{ env.APP_VERSION_NAME }}-release
           path: |
-            build-artifacts/MushafStock-v1.0.1-universal-release.apk
-            build-artifacts/MushafStock-v1.0.1-universal-release.apk.sha256
+            build-artifacts/MushafStock-*.apk
+            build-artifacts/MushafStock-*.sha256
           if-no-files-found: error
           retention-days: 30
 
@@ -241,9 +259,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            build-artifacts/MushafStock-v1.0.1-universal-release.apk
-            build-artifacts/MushafStock-v1.0.1-universal-release.apk.sha256
-            build-artifacts/MushafStock-debug.apk
+            build-artifacts/MushafStock-*.apk
+            build-artifacts/MushafStock-*.sha256
           name: Release ${{ github.ref_name }}
           draft: false
           prerelease: false
