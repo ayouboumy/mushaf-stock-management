@@ -100,17 +100,6 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
     val currentScreen: StateFlow<AppScreen> = _currentScreen.asStateFlow()
     private val _screenStack = mutableListOf(initialScreen)
 
-    init {
-        viewModelScope.launch {
-            try {
-                repository.syncManager.diagnoseConnection()
-                repository.syncManager.fullBidirectionalSync()
-            } catch (e: Exception) {
-                android.util.Log.e("StockViewModel", "Startup sync check failed", e)
-            }
-        }
-    }
-
     fun navigateTo(screen: AppScreen) {
         if (_screenStack.lastOrNull() != screen) {
             _screenStack.add(screen)
@@ -178,6 +167,8 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
                         nameArabic = newVariantName.trim().ifBlank { variant.nameArabic }
                     )
                     database.productVariantDao().updateVariant(updatedVariant)
+                    repository.syncManager.markLocalPendingPush(com.example.data.sync.SyncEntityType.VARIANT, updatedVariant.id)
+                    repository.syncManager.pushVariant(updatedVariant)
                 }
             }
             val currentCalculated = calculatedStockList.value.find {
@@ -457,6 +448,7 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
         refreshNextVoucherNumber()
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                repository.syncManager.diagnoseConnection()
                 repository.initialCloudSyncAndSeed()
             } catch (e: Exception) {
                 android.util.Log.e("StockViewModel", "Error in initial cloud sync", e)
@@ -695,20 +687,7 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
 
                     // 2. Determine or auto-create variant
                     val variantId: Long? = if (!row.variantName.isNullOrBlank()) {
-                        val existingVar = database.productVariantDao().getVariantByName(productId, row.variantName)
-                        if (existingVar != null) {
-                            existingVar.id
-                        } else {
-                            val varEntity = ProductVariantEntity(
-                                productId = productId,
-                                nameArabic = row.variantName,
-                                nameFrench = "",
-                                code = ""
-                            )
-                            val vId = database.productVariantDao().insertVariant(varEntity)
-                            repository.syncManager.pushVariant(varEntity.copy(id = vId))
-                            vId
-                        }
+                        repository.getOrCreateVariant(productId, row.variantName).id
                     } else {
                         importTargetVariantId.value
                     }
@@ -1162,12 +1141,18 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun restoreBackup(jsonString: String) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val ok = BackupHelper.restoreDatabaseFromJson(jsonString, database)
             if (ok) {
-                showMessage("تمت استعادة النسخة الاحتياطية بنجاح")
+                repository.syncManager.clearLocalSyncMetadata()
+                repository.syncManager.pushAllToCloud()
+                withContext(Dispatchers.Main) {
+                    showMessage("تمت استعادة النسخة الاحتياطية بنجاح")
+                }
             } else {
-                showMessage("فشل استعادة النسخة الاحتياطية: ملف غير صالح")
+                withContext(Dispatchers.Main) {
+                    showMessage("فشل استعادة النسخة الاحتياطية: ملف غير صالح")
+                }
             }
         }
     }

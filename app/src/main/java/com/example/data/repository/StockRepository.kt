@@ -12,6 +12,8 @@ import com.example.data.model.PeriodStockResult
 import com.example.data.model.StockCalculator
 import com.example.data.model.StockStatus
 import com.example.data.model.ValidationResult
+import com.example.data.sync.SyncEntityType
+import com.example.data.sync.UniqueIdGenerator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -237,6 +239,7 @@ class StockRepository(private val database: AppDatabase) {
         notes: String
     ): Long {
         val movement = StockMovementEntity(
+            id = UniqueIdGenerator.nextId(),
             productId = productId,
             variantId = variantId,
             movementType = "STOCK_IN",
@@ -250,7 +253,9 @@ class StockRepository(private val database: AppDatabase) {
             notes = notes
         )
         val id = movementDao.insertMovement(movement)
-        syncManager.pushMovement(movement.copy(id = id))
+        val savedMovement = movement.copy(id = id)
+        syncManager.markLocalPendingPush(SyncEntityType.MOVEMENT, id)
+        syncManager.pushMovement(savedMovement)
         auditLogDao.insertLog(
             AuditLogEntity(
                 action = "STOCK_IN",
@@ -285,6 +290,7 @@ class StockRepository(private val database: AppDatabase) {
         }
 
         val movement = StockMovementEntity(
+            id = UniqueIdGenerator.nextId(),
             productId = productId,
             variantId = variantId,
             movementType = "STOCK_OUT",
@@ -300,7 +306,9 @@ class StockRepository(private val database: AppDatabase) {
             notes = notes
         )
         val id = movementDao.insertMovement(movement)
-        syncManager.pushMovement(movement.copy(id = id))
+        val savedMovement = movement.copy(id = id)
+        syncManager.markLocalPendingPush(SyncEntityType.MOVEMENT, id)
+        syncManager.pushMovement(savedMovement)
         auditLogDao.insertLog(
             AuditLogEntity(
                 action = "STOCK_OUT",
@@ -325,6 +333,7 @@ class StockRepository(private val database: AppDatabase) {
         notes: String
     ): Long {
         val movement = StockMovementEntity(
+            id = UniqueIdGenerator.nextId(),
             productId = productId,
             variantId = variantId,
             movementType = "ADJUSTMENT",
@@ -337,7 +346,9 @@ class StockRepository(private val database: AppDatabase) {
             notes = notes
         )
         val id = movementDao.insertMovement(movement)
-        syncManager.pushMovement(movement.copy(id = id))
+        val savedMovement = movement.copy(id = id)
+        syncManager.markLocalPendingPush(SyncEntityType.MOVEMENT, id)
+        syncManager.pushMovement(savedMovement)
         auditLogDao.insertLog(
             AuditLogEntity(
                 action = "ADJUSTMENT",
@@ -364,6 +375,7 @@ class StockRepository(private val database: AppDatabase) {
         val now = System.currentTimeMillis()
         val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
         val adjMovement = StockMovementEntity(
+            id = UniqueIdGenerator.nextId(),
             productId = movement.productId,
             variantId = movement.variantId,
             movementType = "ADJUSTMENT",
@@ -377,6 +389,8 @@ class StockRepository(private val database: AppDatabase) {
         )
         val newAdjId = movementDao.insertMovement(adjMovement)
         movementDao.markReversed(movementId, newAdjId, now)
+        syncManager.markLocalPendingPush(SyncEntityType.MOVEMENT, newAdjId)
+        syncManager.markLocalPendingPush(SyncEntityType.MOVEMENT, movementId)
         syncManager.pushMovement(adjMovement.copy(id = newAdjId))
         movementDao.getMovementById(movementId)?.let { syncManager.pushMovement(it) }
 
@@ -395,6 +409,7 @@ class StockRepository(private val database: AppDatabase) {
     suspend fun softDeleteMovement(movementId: Long): Boolean {
         val movement = movementDao.getMovementById(movementId) ?: return false
         movementDao.softDeleteMovement(movementId)
+        syncManager.markLocalPendingPush(SyncEntityType.MOVEMENT, movementId)
         movementDao.getMovementById(movementId)?.let { syncManager.pushMovement(it) }
         auditLogDao.insertLog(
             AuditLogEntity(
@@ -476,15 +491,22 @@ class StockRepository(private val database: AppDatabase) {
 
     // Product CRUD
     suspend fun createProduct(product: ProductEntity, variants: List<ProductVariantEntity> = emptyList()): Long {
-        val id = productDao.insertProduct(product)
-        val createdProduct = product.copy(id = id)
+        val assignedId = if (product.id > 0L) product.id else UniqueIdGenerator.nextId()
+        val productToInsert = product.copy(id = assignedId, updatedAt = System.currentTimeMillis())
+        val id = productDao.insertProduct(productToInsert)
+        val createdProduct = productToInsert.copy(id = id)
+        syncManager.markLocalPendingPush(SyncEntityType.PRODUCT, id)
         syncManager.pushProduct(createdProduct)
 
         if (variants.isNotEmpty()) {
-            val variantsWithId = variants.map { it.copy(productId = id) }
+            val variantsWithId = variants.map { v ->
+                val vId = if (v.id > 0L) v.id else UniqueIdGenerator.nextId()
+                v.copy(id = vId, productId = id)
+            }
             val variantIds = variantDao.insertAll(variantsWithId)
             variantsWithId.forEachIndexed { index, v ->
                 val vId = variantIds.getOrNull(index) ?: v.id
+                syncManager.markLocalPendingPush(SyncEntityType.VARIANT, vId)
                 syncManager.pushVariant(v.copy(id = vId))
             }
         }
@@ -500,8 +522,10 @@ class StockRepository(private val database: AppDatabase) {
     }
 
     suspend fun updateProduct(product: ProductEntity) {
-        productDao.updateProduct(product)
-        syncManager.pushProduct(product)
+        val updated = product.copy(updatedAt = System.currentTimeMillis())
+        productDao.updateProduct(updated)
+        syncManager.markLocalPendingPush(SyncEntityType.PRODUCT, updated.id)
+        syncManager.pushProduct(updated)
         auditLogDao.insertLog(
             AuditLogEntity(
                 action = "UPDATE_PRODUCT",
@@ -515,12 +539,25 @@ class StockRepository(private val database: AppDatabase) {
     suspend fun deleteProduct(productId: Long) {
         val prod = productDao.getProductById(productId)
         val productMovements = movementDao.getAllMovementsList().filter { it.productId == productId }
+        val productVariants = variantDao.getVariantsListForProduct(productId)
         for (m in productMovements) {
-            syncManager.deleteMovement(m.id)
+            syncManager.markLocalPendingDelete(SyncEntityType.MOVEMENT, m.id)
         }
+        for (v in productVariants) {
+            syncManager.markLocalPendingDelete(SyncEntityType.VARIANT, v.id)
+        }
+        syncManager.markLocalPendingDelete(SyncEntityType.PRODUCT, productId)
+
         movementDao.deleteMovementsByProduct(productId)
         variantDao.deleteVariantsByProduct(productId)
         productDao.deleteProductById(productId)
+
+        for (m in productMovements) {
+            syncManager.deleteMovement(m.id)
+        }
+        for (v in productVariants) {
+            syncManager.deleteVariant(v.id)
+        }
         syncManager.deleteProduct(productId)
         auditLogDao.insertLog(
             AuditLogEntity(
@@ -537,10 +574,13 @@ class StockRepository(private val database: AppDatabase) {
         val trimmedNew = newCategory.trim()
         if (trimmedOld.isBlank() || trimmedNew.isBlank() || trimmedOld == trimmedNew) return
         productDao.updateCategoryName(trimmedOld, trimmedNew)
-        // Sync updated products in this category
+        val now = System.currentTimeMillis()
         val updatedProducts = productDao.getActiveProductsList().filter { it.category == trimmedNew }
         for (p in updatedProducts) {
-            syncManager.pushProduct(p)
+            val stamped = p.copy(updatedAt = now)
+            productDao.updateProduct(stamped)
+            syncManager.markLocalPendingPush(SyncEntityType.PRODUCT, stamped.id)
+            syncManager.pushProduct(stamped)
         }
         auditLogDao.insertLog(
             AuditLogEntity(
@@ -553,8 +593,11 @@ class StockRepository(private val database: AppDatabase) {
 
     // Destination CRUD
     suspend fun addDestination(destination: DestinationEntity): Long {
-        val id = destinationDao.insertDestination(destination)
-        syncManager.pushDestination(destination.copy(id = id))
+        val assignedId = if (destination.id > 0L) destination.id else UniqueIdGenerator.nextId()
+        val toInsert = destination.copy(id = assignedId)
+        val id = destinationDao.insertDestination(toInsert)
+        syncManager.markLocalPendingPush(SyncEntityType.DESTINATION, id)
+        syncManager.pushDestination(toInsert.copy(id = id))
         auditLogDao.insertLog(
             AuditLogEntity(
                 action = "CREATE_DESTINATION",
@@ -568,10 +611,12 @@ class StockRepository(private val database: AppDatabase) {
 
     suspend fun updateDestination(destination: DestinationEntity) {
         destinationDao.updateDestination(destination)
+        syncManager.markLocalPendingPush(SyncEntityType.DESTINATION, destination.id)
         syncManager.pushDestination(destination)
     }
 
     suspend fun deleteDestination(destinationId: Long) {
+        syncManager.markLocalPendingDelete(SyncEntityType.DESTINATION, destinationId)
         destinationDao.deleteDestinationById(destinationId)
         syncManager.deleteDestination(destinationId)
     }
@@ -582,14 +627,16 @@ class StockRepository(private val database: AppDatabase) {
             if (address.isNotBlank() && existing.address != address) {
                 val updated = existing.copy(address = address)
                 destinationDao.updateDestination(updated)
+                syncManager.markLocalPendingPush(SyncEntityType.DESTINATION, updated.id)
                 syncManager.pushDestination(updated)
                 return updated
             }
             return existing
         }
-        val newDest = DestinationEntity(name = name, type = type, address = address)
+        val newDest = DestinationEntity(id = UniqueIdGenerator.nextId(), name = name, type = type, address = address)
         val id = destinationDao.insertDestination(newDest)
         val withId = newDest.copy(id = id)
+        syncManager.markLocalPendingPush(SyncEntityType.DESTINATION, id)
         syncManager.pushDestination(withId)
         return withId
     }
@@ -598,6 +645,7 @@ class StockRepository(private val database: AppDatabase) {
         val existing = productDao.getProductByName(name)
         if (existing != null) return existing
         val newProd = ProductEntity(
+            id = UniqueIdGenerator.nextId(),
             nameArabic = name,
             category = category,
             packageQuantity = packageQuantity,
@@ -606,7 +654,25 @@ class StockRepository(private val database: AppDatabase) {
         )
         val id = productDao.insertProduct(newProd)
         val withId = newProd.copy(id = id)
+        syncManager.markLocalPendingPush(SyncEntityType.PRODUCT, id)
         syncManager.pushProduct(withId)
+        return withId
+    }
+
+    suspend fun getOrCreateVariant(productId: Long, nameArabic: String): ProductVariantEntity {
+        val existing = variantDao.getVariantByName(productId, nameArabic)
+        if (existing != null) return existing
+        val newVariant = ProductVariantEntity(
+            id = UniqueIdGenerator.nextId(),
+            productId = productId,
+            nameArabic = nameArabic,
+            nameFrench = "",
+            code = ""
+        )
+        val id = variantDao.insertVariant(newVariant)
+        val withId = newVariant.copy(id = id)
+        syncManager.markLocalPendingPush(SyncEntityType.VARIANT, id)
+        syncManager.pushVariant(withId)
         return withId
     }
 
@@ -640,13 +706,15 @@ class StockRepository(private val database: AppDatabase) {
             if (variant != null) {
                 val updated = variant.copy(initialStock = newInitialStock)
                 variantDao.updateVariant(updated)
+                syncManager.markLocalPendingPush(SyncEntityType.VARIANT, updated.id)
                 syncManager.pushVariant(updated)
             }
         } else {
             val prod = productDao.getProductById(productId)
             if (prod != null) {
-                val updated = prod.copy(initialStock = newInitialStock)
+                val updated = prod.copy(initialStock = newInitialStock, updatedAt = System.currentTimeMillis())
                 productDao.updateProduct(updated)
+                syncManager.markLocalPendingPush(SyncEntityType.PRODUCT, updated.id)
                 syncManager.pushProduct(updated)
             }
         }
@@ -675,9 +743,11 @@ class StockRepository(private val database: AppDatabase) {
                 nameArabic = nameArabic.ifBlank { prod.nameArabic },
                 category = category.ifBlank { prod.category },
                 formatType = formatType.ifBlank { prod.formatType },
-                minimumStock = minimumStock
+                minimumStock = minimumStock,
+                updatedAt = System.currentTimeMillis()
             )
             productDao.updateProduct(updated)
+            syncManager.markLocalPendingPush(SyncEntityType.PRODUCT, updated.id)
             syncManager.pushProduct(updated)
         }
         if (variantId != null) {
@@ -688,6 +758,7 @@ class StockRepository(private val database: AppDatabase) {
                     minimumStock = minimumStock
                 )
                 variantDao.updateVariant(updatedV)
+                syncManager.markLocalPendingPush(SyncEntityType.VARIANT, updatedV.id)
                 syncManager.pushVariant(updatedV)
             }
         }
@@ -704,8 +775,8 @@ class StockRepository(private val database: AppDatabase) {
     // Comprehensive Initial Cloud Sync
     suspend fun initialCloudSyncAndSeed() = withContext(Dispatchers.IO) {
         try {
-            syncManager.startRealtimeListeners()
-            syncManager.pullAllFromCloud()
+            syncManager.ensureCollectionListenersActive()
+            syncManager.fullBidirectionalSync()
         } catch (e: Exception) {
             android.util.Log.e("StockRepository", "initialCloudSync error", e)
         }
@@ -716,6 +787,7 @@ class StockRepository(private val database: AppDatabase) {
         try {
             syncManager.isClearingInProgress = true
             syncManager.stopListeners()
+            syncManager.clearLocalSyncMetadata()
             // 1. Initial local wipe
             movementDao.clearAllMovements()
             variantDao.clearAllVariants()
@@ -738,6 +810,7 @@ class StockRepository(private val database: AppDatabase) {
             productDao.clearAllProducts()
             destinationDao.clearAllDestinations()
             auditLogDao.clearLogs()
+            syncManager.clearLocalSyncMetadata()
         } finally {
             syncManager.isClearingInProgress = false
             syncManager.startRealtimeListeners()

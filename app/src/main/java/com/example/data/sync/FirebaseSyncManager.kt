@@ -1,5 +1,6 @@
 package com.example.data.sync
 
+import android.content.Context
 import android.util.Log
 import com.example.data.db.AppDatabase
 import com.example.data.entity.DestinationEntity
@@ -11,18 +12,22 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
+import com.google.firebase.firestore.Source
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
+import java.net.URLEncoder
 
 sealed class CloudSyncDiagnostic {
     object Idle : CloudSyncDiagnostic()
@@ -37,7 +42,7 @@ sealed class CloudSyncDiagnostic {
 data class FirestoreDiagnosticReport(
     val timestamp: Long = System.currentTimeMillis(),
     val isConnected: Boolean,
-    val connectionEngine: String, // "Firestore SDK (gRPC)" or "Firestore REST Engine" or "None"
+    val connectionEngine: String,
     val latencyMs: Long,
     val authenticatedUserId: String?,
     val isAuthAnonymous: Boolean,
@@ -54,10 +59,40 @@ data class FirestoreDiagnosticReport(
     val logMessages: List<String>
 )
 
-class FirebaseSyncManager(private val database: AppDatabase) {
+internal data class RemoteProductRecord(
+    val entity: ProductEntity,
+    val updatedAt: Long
+)
+
+internal data class RemoteVariantRecord(
+    val entity: ProductVariantEntity,
+    val updatedAt: Long
+)
+
+internal data class RemoteMovementRecord(
+    val entity: StockMovementEntity,
+    val updatedAt: Long
+)
+
+internal data class RemoteDestinationRecord(
+    val entity: DestinationEntity,
+    val updatedAt: Long
+)
+
+class FirebaseSyncManager(
+    private val database: AppDatabase,
+    context: Context? = com.example.StockApplication.appContext
+) {
 
     @Volatile
     var isClearingInProgress = false
+
+    internal val syncStore = SyncStateStore(context)
+    private val syncMutex = Mutex()
+
+    init {
+        UniqueIdGenerator.init(context)
+    }
 
     private val firestore: FirebaseFirestore
         get() {
@@ -70,6 +105,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
             com.example.StockApplication.initializeFirebase(com.example.StockApplication.appContext)
             return FirebaseAuth.getInstance()
         }
+
     private val coroutineExceptionHandler = kotlinx.coroutines.CoroutineExceptionHandler { _, throwable ->
         Log.e("FirebaseSync", "Unhandled sync error caught safely", throwable)
     }
@@ -101,6 +137,18 @@ class FirebaseSyncManager(private val database: AppDatabase) {
 
     private val _diagnosticReport = MutableStateFlow<FirestoreDiagnosticReport?>(null)
     val diagnosticReport: StateFlow<FirestoreDiagnosticReport?> = _diagnosticReport.asStateFlow()
+
+    fun markLocalPendingPush(type: SyncEntityType, id: Long) {
+        syncStore.markPendingPush(type, id)
+    }
+
+    fun markLocalPendingDelete(type: SyncEntityType, id: Long) {
+        syncStore.markPendingDelete(type, id)
+    }
+
+    fun clearLocalSyncMetadata() {
+        syncStore.clearAll()
+    }
 
     fun parseErrorToDiagnostic(e: Throwable): CloudSyncDiagnostic {
         val msg = e.message ?: e.localizedMessage ?: "Unknown error"
@@ -134,9 +182,20 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         }
     }
 
+    private suspend fun getAuthIdToken(): String? {
+        return try {
+            val user = auth.currentUser ?: return null
+            withTimeoutOrNull(1500) {
+                user.getIdToken(false).await()?.token
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private fun probeRestApi(): Boolean {
         return try {
-            val url = java.net.URL("https://firestore.googleapis.com/v1/projects/mushaf-stock/databases/(default)/documents/products?key=AIzaSyCr1ToMuR2ejNwkRmnRcRU0zUZdcIfnUQM")
+            val url = java.net.URL("https://firestore.googleapis.com/v1/projects/mushaf-stock/databases/(default)/documents/products?pageSize=1&key=$apiKey")
             val conn = url.openConnection() as java.net.HttpURLConnection
             conn.connectTimeout = 5000
             conn.readTimeout = 5000
@@ -154,18 +213,23 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         _syncDiagnostic.value = CloudSyncDiagnostic.Checking
         try {
             ensureAuth()
-            firestore.collection("products").limit(1).get().await()
+            firestore.collection("products").limit(1).get(Source.SERVER).await()
+            isPermissionDenied = false
             _syncError.value = null
             _syncDiagnostic.value = CloudSyncDiagnostic.Connected
             CloudSyncDiagnostic.Connected
         } catch (e: Exception) {
             val restOk = probeRestApi()
             if (restOk) {
+                isPermissionDenied = false
                 _syncError.value = null
                 _syncDiagnostic.value = CloudSyncDiagnostic.Connected
                 CloudSyncDiagnostic.Connected
             } else {
                 val diag = parseErrorToDiagnostic(e)
+                if (diag is CloudSyncDiagnostic.PermissionDenied) {
+                    isPermissionDenied = true
+                }
                 _syncError.value = e.localizedMessage ?: e.message
                 _syncDiagnostic.value = diag
                 diag
@@ -174,11 +238,8 @@ class FirebaseSyncManager(private val database: AppDatabase) {
     }
 
     @Volatile
-    private var authAttempted = false
-    @Volatile
     private var isAuthDisabled = false
 
-    // Ensure user is signed in to Firebase Auth if available, otherwise direct Firestore access
     suspend fun ensureAuth(): Boolean {
         if (isAuthDisabled) return true
         if (auth.currentUser != null) return true
@@ -195,7 +256,6 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         }
     }
 
-    // Register or sign in user with email & password in Firebase Auth + Firestore
     suspend fun registerOrAuthUser(profile: UserProfile, password: String = ""): Boolean {
         return withContext(Dispatchers.IO) {
             try {
@@ -220,7 +280,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 true
             } catch (e: Exception) {
                 Log.e("FirebaseSync", "registerOrAuthUser error", e)
-                true // proceed gracefully so local usage is not blocked
+                true
             }
         }
     }
@@ -237,7 +297,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         if (isPerm) {
             if (!isPermissionDenied) {
                 isPermissionDenied = true
-                Log.w("FirebaseSync", "Cloud Firestore requires authentication. Operating in local Room DB mode without network listener errors.")
+                Log.w("FirebaseSync", "Cloud Firestore requires authentication. Operating in local Room DB mode without wiping local records.")
             }
             stopListeners()
         } else {
@@ -245,7 +305,6 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         }
     }
 
-    // Start Realtime Firestore Listeners to receive changes from other devices instantly
     fun startRealtimeListeners() {
         scope.launch {
             try {
@@ -262,48 +321,43 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                             handleCollectionListenerError("products", error)
                             return@addSnapshotListener
                         }
+                        isPermissionDenied = false
                         _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("products", true) }
                         _syncDiagnostic.value = CloudSyncDiagnostic.Connected
                         if (snapshot != null && !isClearingInProgress) {
+                            val isFromCache = snapshot.metadata.isFromCache
+                            val hasPending = snapshot.metadata.hasPendingWrites()
+                            if (isFromCache && snapshot.isEmpty) {
+                                // Never wipe local Room DB on an empty local Firestore cache snapshot
+                                return@addSnapshotListener
+                            }
+                            val records = snapshot.documents.mapNotNull { doc ->
+                                val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: return@mapNotNull null
+                                val isActive = doc.getBoolean("active") ?: true
+                                val updatedAt = doc.getLong("updatedAt") ?: 0L
+                                val entity = ProductEntity(
+                                    id = id,
+                                    nameArabic = doc.getString("nameArabic") ?: "",
+                                    nameFrench = doc.getString("nameFrench") ?: "",
+                                    category = doc.getString("category") ?: "مصحف شريف",
+                                    formatType = doc.getString("formatType") ?: "عادي",
+                                    unit = doc.getString("unit") ?: "نسخة",
+                                    packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 1,
+                                    minimumStock = doc.getLong("minimumStock")?.toInt() ?: 0,
+                                    initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
+                                    notes = doc.getString("notes") ?: "",
+                                    active = isActive,
+                                    updatedAt = if (updatedAt > 0L) updatedAt else System.currentTimeMillis()
+                                )
+                                RemoteProductRecord(entity, updatedAt)
+                            }
+                            val isAuthoritative = !isFromCache && !hasPending
                             scope.launch {
-                                try {
-                                    if (snapshot.isEmpty) {
-                                        database.productDao().clearAllProducts()
-                                    } else {
-                                        val remoteIds = mutableSetOf<Long>()
-                                        for (doc in snapshot.documents) {
-                                            if (isClearingInProgress) return@launch
-                                            val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                                            remoteIds.add(id)
-                                            val isActive = doc.getBoolean("active") ?: true
-                                            if (isActive) {
-                                                val entity = ProductEntity(
-                                                    id = id,
-                                                    nameArabic = doc.getString("nameArabic") ?: "",
-                                                    nameFrench = doc.getString("nameFrench") ?: "",
-                                                    category = doc.getString("category") ?: "مصحف شريف",
-                                                    formatType = doc.getString("formatType") ?: "عادي",
-                                                    unit = doc.getString("unit") ?: "نسخة",
-                                                    packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 1,
-                                                    minimumStock = doc.getLong("minimumStock")?.toInt() ?: 0,
-                                                    initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
-                                                    notes = doc.getString("notes") ?: "",
-                                                    active = true
-                                                )
-                                                database.productDao().insertProduct(entity)
-                                            } else {
-                                                database.productDao().deleteProductById(id)
-                                            }
-                                        }
-                                        for (lp in database.productDao().getAllProductsList()) {
-                                            if (!remoteIds.contains(lp.id)) {
-                                                database.productDao().deleteProductById(lp.id)
-                                            }
-                                        }
+                                syncMutex.withLock {
+                                    if (!isClearingInProgress) {
+                                        mergeRemoteProducts(records, isAuthoritative)
+                                        _lastSyncTimestamp.value = System.currentTimeMillis()
                                     }
-                                    _lastSyncTimestamp.value = System.currentTimeMillis()
-                                } catch (e: Exception) {
-                                    Log.e("FirebaseSync", "Error syncing products from Firestore", e)
                                 }
                             }
                         }
@@ -319,47 +373,40 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                             handleCollectionListenerError("variants", error)
                             return@addSnapshotListener
                         }
+                        isPermissionDenied = false
                         _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("variants", true) }
                         _syncDiagnostic.value = CloudSyncDiagnostic.Connected
                         if (snapshot != null && !isClearingInProgress) {
+                            val isFromCache = snapshot.metadata.isFromCache
+                            val hasPending = snapshot.metadata.hasPendingWrites()
+                            if (isFromCache && snapshot.isEmpty) {
+                                return@addSnapshotListener
+                            }
+                            val records = snapshot.documents.mapNotNull { doc ->
+                                val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: return@mapNotNull null
+                                val isActive = doc.getBoolean("active") ?: true
+                                val updatedAt = doc.getLong("updatedAt") ?: 0L
+                                val entity = ProductVariantEntity(
+                                    id = id,
+                                    productId = doc.getLong("productId") ?: 0L,
+                                    nameArabic = doc.getString("nameArabic") ?: "",
+                                    nameFrench = doc.getString("nameFrench") ?: "",
+                                    code = doc.getString("code") ?: "",
+                                    initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
+                                    minimumStock = doc.getLong("minimumStock")?.toInt() ?: 20,
+                                    packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 10,
+                                    notes = doc.getString("notes") ?: "",
+                                    active = isActive
+                                )
+                                RemoteVariantRecord(entity, updatedAt)
+                            }
+                            val isAuthoritative = !isFromCache && !hasPending
                             scope.launch {
-                                try {
-                                    if (snapshot.isEmpty) {
-                                        database.productVariantDao().clearAllVariants()
-                                    } else {
-                                        val remoteIds = mutableSetOf<Long>()
-                                        for (doc in snapshot.documents) {
-                                            if (isClearingInProgress) return@launch
-                                            val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                                            remoteIds.add(id)
-                                            val isActive = doc.getBoolean("active") ?: true
-                                            if (isActive) {
-                                                val entity = ProductVariantEntity(
-                                                    id = id,
-                                                    productId = doc.getLong("productId") ?: 0L,
-                                                    nameArabic = doc.getString("nameArabic") ?: "",
-                                                    nameFrench = doc.getString("nameFrench") ?: "",
-                                                    code = doc.getString("code") ?: "",
-                                                    initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
-                                                    minimumStock = doc.getLong("minimumStock")?.toInt() ?: 20,
-                                                    packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 10,
-                                                    notes = doc.getString("notes") ?: "",
-                                                    active = true
-                                                )
-                                                database.productVariantDao().insertVariant(entity)
-                                            } else {
-                                                database.productVariantDao().deleteVariantById(id)
-                                            }
-                                        }
-                                        for (lv in database.productVariantDao().getAllVariantsList()) {
-                                            if (!remoteIds.contains(lv.id)) {
-                                                database.productVariantDao().deleteVariantById(lv.id)
-                                            }
-                                        }
+                                syncMutex.withLock {
+                                    if (!isClearingInProgress) {
+                                        mergeRemoteVariants(records, isAuthoritative)
+                                        _lastSyncTimestamp.value = System.currentTimeMillis()
                                     }
-                                    _lastSyncTimestamp.value = System.currentTimeMillis()
-                                } catch (e: Exception) {
-                                    Log.e("FirebaseSync", "Error syncing variants from Firestore", e)
                                 }
                             }
                         }
@@ -375,56 +422,53 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                             handleCollectionListenerError("movements", error)
                             return@addSnapshotListener
                         }
+                        isPermissionDenied = false
                         _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("movements", true) }
                         _syncDiagnostic.value = CloudSyncDiagnostic.Connected
                         if (snapshot != null && !isClearingInProgress) {
+                            val isFromCache = snapshot.metadata.isFromCache
+                            val hasPending = snapshot.metadata.hasPendingWrites()
+                            if (isFromCache && snapshot.isEmpty) {
+                                return@addSnapshotListener
+                            }
+                            val records = snapshot.documents.mapNotNull { doc ->
+                                val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: return@mapNotNull null
+                                val isDel = doc.getBoolean("isDeleted") ?: false
+                                val updatedAt = doc.getLong("updatedAt") ?: 0L
+                                val vId = doc.getLong("variantId")
+                                val dId = doc.getLong("destinationId")
+                                val revId = doc.getLong("reversedByMovementId")
+                                val entity = StockMovementEntity(
+                                    id = id,
+                                    productId = doc.getLong("productId") ?: 0L,
+                                    variantId = if (vId != null && vId > 0) vId else null,
+                                    movementType = doc.getString("movementType") ?: "STOCK_IN",
+                                    quantity = doc.getLong("quantity")?.toInt() ?: 0,
+                                    packageCount = doc.getLong("packageCount")?.toInt() ?: 0,
+                                    dateMillis = doc.getLong("dateMillis") ?: System.currentTimeMillis(),
+                                    dateFormatted = doc.getString("dateFormatted") ?: "",
+                                    source = doc.getString("source") ?: "",
+                                    destinationId = if (dId != null && dId > 0) dId else null,
+                                    destinationName = doc.getString("destinationName") ?: "",
+                                    destinationType = doc.getString("destinationType") ?: "",
+                                    reason = doc.getString("reason") ?: "",
+                                    responsiblePerson = doc.getString("responsiblePerson") ?: "",
+                                    referenceNumber = doc.getString("referenceNumber") ?: "",
+                                    notes = doc.getString("notes") ?: "",
+                                    isReversed = doc.getBoolean("isReversed") ?: false,
+                                    reversedByMovementId = if (revId != null && revId > 0) revId else null,
+                                    isDeleted = isDel,
+                                    updatedAt = if (updatedAt > 0L) updatedAt else System.currentTimeMillis()
+                                )
+                                RemoteMovementRecord(entity, updatedAt)
+                            }
+                            val isAuthoritative = !isFromCache && !hasPending
                             scope.launch {
-                                try {
-                                    if (snapshot.isEmpty) {
-                                        database.stockMovementDao().clearAllMovements()
-                                    } else {
-                                        val remoteIds = mutableSetOf<Long>()
-                                        for (doc in snapshot.documents) {
-                                            if (isClearingInProgress) return@launch
-                                            val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                                            remoteIds.add(id)
-                                            val isDel = doc.getBoolean("isDeleted") ?: false
-                                            if (!isDel) {
-                                                val entity = StockMovementEntity(
-                                                    id = id,
-                                                    productId = doc.getLong("productId") ?: 0L,
-                                                    variantId = doc.getLong("variantId"),
-                                                    movementType = doc.getString("movementType") ?: "STOCK_IN",
-                                                    quantity = doc.getLong("quantity")?.toInt() ?: 0,
-                                                    packageCount = doc.getLong("packageCount")?.toInt() ?: 0,
-                                                    dateMillis = doc.getLong("dateMillis") ?: System.currentTimeMillis(),
-                                                    dateFormatted = doc.getString("dateFormatted") ?: "",
-                                                    source = doc.getString("source") ?: "",
-                                                    destinationId = doc.getLong("destinationId"),
-                                                    destinationName = doc.getString("destinationName") ?: "",
-                                                    destinationType = doc.getString("destinationType") ?: "",
-                                                    reason = doc.getString("reason") ?: "",
-                                                    responsiblePerson = doc.getString("responsiblePerson") ?: "",
-                                                    referenceNumber = doc.getString("referenceNumber") ?: "",
-                                                    notes = doc.getString("notes") ?: "",
-                                                    isReversed = doc.getBoolean("isReversed") ?: false,
-                                                    reversedByMovementId = doc.getLong("reversedByMovementId"),
-                                                    isDeleted = false
-                                                )
-                                                database.stockMovementDao().insertMovement(entity)
-                                            } else {
-                                                database.stockMovementDao().deleteMovementById(id)
-                                            }
-                                        }
-                                        for (lm in database.stockMovementDao().getAllMovementsList()) {
-                                            if (!remoteIds.contains(lm.id)) {
-                                                database.stockMovementDao().deleteMovementById(lm.id)
-                                            }
-                                        }
+                                syncMutex.withLock {
+                                    if (!isClearingInProgress) {
+                                        mergeRemoteMovements(records, isAuthoritative)
+                                        _lastSyncTimestamp.value = System.currentTimeMillis()
                                     }
-                                    _lastSyncTimestamp.value = System.currentTimeMillis()
-                                } catch (e: Exception) {
-                                    Log.e("FirebaseSync", "Error syncing movements from Firestore", e)
                                 }
                             }
                         }
@@ -440,40 +484,38 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                             handleCollectionListenerError("destinations", error)
                             return@addSnapshotListener
                         }
+                        isPermissionDenied = false
                         _activeListenersMap.value = _activeListenersMap.value.toMutableMap().apply { put("destinations", true) }
                         _syncDiagnostic.value = CloudSyncDiagnostic.Connected
                         if (snapshot != null && !isClearingInProgress) {
+                            val isFromCache = snapshot.metadata.isFromCache
+                            val hasPending = snapshot.metadata.hasPendingWrites()
+                            if (isFromCache && snapshot.isEmpty) {
+                                return@addSnapshotListener
+                            }
+                            val records = snapshot.documents.mapNotNull { doc ->
+                                val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: return@mapNotNull null
+                                val updatedAt = doc.getLong("updatedAt") ?: 0L
+                                val entity = DestinationEntity(
+                                    id = id,
+                                    name = doc.getString("name") ?: "",
+                                    type = doc.getString("type") ?: "مسجد",
+                                    commune = doc.getString("commune") ?: "",
+                                    province = doc.getString("province") ?: "",
+                                    address = doc.getString("address") ?: "",
+                                    contactPerson = doc.getString("contactPerson") ?: "",
+                                    phone = doc.getString("phone") ?: "",
+                                    notes = doc.getString("notes") ?: ""
+                                )
+                                RemoteDestinationRecord(entity, updatedAt)
+                            }
+                            val isAuthoritative = !isFromCache && !hasPending
                             scope.launch {
-                                try {
-                                    if (snapshot.isEmpty) {
-                                        database.destinationDao().clearAllDestinations()
-                                    } else {
-                                        val remoteIds = mutableSetOf<Long>()
-                                        for (doc in snapshot.documents) {
-                                            if (isClearingInProgress) return@launch
-                                            val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                                            remoteIds.add(id)
-                                            val entity = DestinationEntity(
-                                                id = id,
-                                                name = doc.getString("name") ?: "",
-                                                type = doc.getString("type") ?: "مسجد",
-                                                commune = doc.getString("commune") ?: "",
-                                                province = doc.getString("province") ?: "",
-                                                address = doc.getString("address") ?: "",
-                                                contactPerson = doc.getString("contactPerson") ?: "",
-                                                phone = doc.getString("phone") ?: ""
-                                            )
-                                            database.destinationDao().insertDestination(entity)
-                                        }
-                                        for (ld in database.destinationDao().getAllDestinationsList()) {
-                                            if (!remoteIds.contains(ld.id)) {
-                                                database.destinationDao().deleteDestinationById(ld.id)
-                                            }
-                                        }
+                                syncMutex.withLock {
+                                    if (!isClearingInProgress) {
+                                        mergeRemoteDestinations(records, isAuthoritative)
+                                        _lastSyncTimestamp.value = System.currentTimeMillis()
                                     }
-                                    _lastSyncTimestamp.value = System.currentTimeMillis()
-                                } catch (e: Exception) {
-                                    Log.e("FirebaseSync", "Error syncing destinations from Firestore", e)
                                 }
                             }
                         }
@@ -499,7 +541,6 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         )
     }
 
-    // Ensure collection listeners are active and registered
     fun ensureCollectionListenersActive() {
         if (isPermissionDenied && auth.currentUser == null) return
         if (listeners.size < 4 || _activeListenersMap.value.values.any { !it }) {
@@ -508,7 +549,194 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         }
     }
 
-    // Comprehensive Diagnostic Utility: Verifies Connection, Read/Write permissions, and Collection Listeners
+    // ==================== Safe Non-Destructive Merge Engine ====================
+
+    internal suspend fun mergeRemoteProducts(
+        remoteRecords: List<RemoteProductRecord>,
+        isAuthoritativeServerSnapshot: Boolean
+    ) {
+        if (isClearingInProgress) return
+        val localMap = database.productDao().getAllProductsList().associateBy { it.id }
+        val remoteIds = mutableSetOf<Long>()
+
+        for (rec in remoteRecords) {
+            if (isClearingInProgress) return
+            val id = rec.entity.id
+            remoteIds.add(id)
+            if (syncStore.isPendingDelete(SyncEntityType.PRODUCT, id)) {
+                continue
+            }
+
+            val isPendingLocal = syncStore.isPendingPush(SyncEntityType.PRODUCT, id)
+            val local = localMap[id]
+            if (isPendingLocal && local != null) {
+                // Keep newer local unsynced edit; only apply remote if strictly newer on server
+                if (rec.updatedAt <= local.updatedAt) {
+                    continue
+                }
+            }
+
+            if (rec.entity.active) {
+                database.productDao().insertProduct(rec.entity)
+                syncStore.markKnownCloud(SyncEntityType.PRODUCT, id)
+                if (isPendingLocal && local != null && rec.updatedAt > local.updatedAt) {
+                    syncStore.markPushSucceeded(SyncEntityType.PRODUCT, id)
+                }
+            } else {
+                database.productDao().deleteProductById(id)
+                syncStore.markRemovedFromCloud(SyncEntityType.PRODUCT, id)
+            }
+        }
+
+        // Only prune items absent from server if this is a verified authoritative server snapshot
+        // AND the item was previously confirmed synced with cloud (never delete unsynced local items!)
+        if (isAuthoritativeServerSnapshot) {
+            for ((localId, _) in localMap) {
+                if (!remoteIds.contains(localId)) {
+                    if (syncStore.isKnownCloud(SyncEntityType.PRODUCT, localId) &&
+                        !syncStore.isPendingPush(SyncEntityType.PRODUCT, localId)
+                    ) {
+                        database.productDao().deleteProductById(localId)
+                        syncStore.markRemovedFromCloud(SyncEntityType.PRODUCT, localId)
+                    }
+                }
+            }
+        }
+    }
+
+    internal suspend fun mergeRemoteVariants(
+        remoteRecords: List<RemoteVariantRecord>,
+        isAuthoritativeServerSnapshot: Boolean
+    ) {
+        if (isClearingInProgress) return
+        val localList = database.productVariantDao().getAllVariantsList()
+        val localIds = localList.map { it.id }.toSet()
+        val remoteIds = mutableSetOf<Long>()
+
+        for (rec in remoteRecords) {
+            if (isClearingInProgress) return
+            val id = rec.entity.id
+            remoteIds.add(id)
+            if (syncStore.isPendingDelete(SyncEntityType.VARIANT, id)) {
+                continue
+            }
+
+            if (syncStore.isPendingPush(SyncEntityType.VARIANT, id) && localIds.contains(id)) {
+                continue
+            }
+
+            if (rec.entity.active) {
+                database.productVariantDao().insertVariant(rec.entity)
+                syncStore.markKnownCloud(SyncEntityType.VARIANT, id)
+            } else {
+                database.productVariantDao().deleteVariantById(id)
+                syncStore.markRemovedFromCloud(SyncEntityType.VARIANT, id)
+            }
+        }
+
+        if (isAuthoritativeServerSnapshot) {
+            for (lv in localList) {
+                if (!remoteIds.contains(lv.id)) {
+                    if (syncStore.isKnownCloud(SyncEntityType.VARIANT, lv.id) &&
+                        !syncStore.isPendingPush(SyncEntityType.VARIANT, lv.id)
+                    ) {
+                        database.productVariantDao().deleteVariantById(lv.id)
+                        syncStore.markRemovedFromCloud(SyncEntityType.VARIANT, lv.id)
+                    }
+                }
+            }
+        }
+    }
+
+    internal suspend fun mergeRemoteMovements(
+        remoteRecords: List<RemoteMovementRecord>,
+        isAuthoritativeServerSnapshot: Boolean
+    ) {
+        if (isClearingInProgress) return
+        val localMap = database.stockMovementDao().getAllMovementsList().associateBy { it.id }
+        val remoteIds = mutableSetOf<Long>()
+
+        for (rec in remoteRecords) {
+            if (isClearingInProgress) return
+            val id = rec.entity.id
+            remoteIds.add(id)
+            if (syncStore.isPendingDelete(SyncEntityType.MOVEMENT, id)) {
+                continue
+            }
+
+            val isPendingLocal = syncStore.isPendingPush(SyncEntityType.MOVEMENT, id)
+            val local = localMap[id]
+            if (isPendingLocal && local != null) {
+                if (rec.updatedAt <= local.updatedAt) {
+                    continue
+                }
+            }
+
+            if (!rec.entity.isDeleted) {
+                database.stockMovementDao().insertMovement(rec.entity)
+                syncStore.markKnownCloud(SyncEntityType.MOVEMENT, id)
+                if (isPendingLocal && local != null && rec.updatedAt > local.updatedAt) {
+                    syncStore.markPushSucceeded(SyncEntityType.MOVEMENT, id)
+                }
+            } else {
+                database.stockMovementDao().deleteMovementById(id)
+                syncStore.markRemovedFromCloud(SyncEntityType.MOVEMENT, id)
+            }
+        }
+
+        if (isAuthoritativeServerSnapshot) {
+            for ((localId, _) in localMap) {
+                if (!remoteIds.contains(localId)) {
+                    if (syncStore.isKnownCloud(SyncEntityType.MOVEMENT, localId) &&
+                        !syncStore.isPendingPush(SyncEntityType.MOVEMENT, localId)
+                    ) {
+                        database.stockMovementDao().deleteMovementById(localId)
+                        syncStore.markRemovedFromCloud(SyncEntityType.MOVEMENT, localId)
+                    }
+                }
+            }
+        }
+    }
+
+    internal suspend fun mergeRemoteDestinations(
+        remoteRecords: List<RemoteDestinationRecord>,
+        isAuthoritativeServerSnapshot: Boolean
+    ) {
+        if (isClearingInProgress) return
+        val localList = database.destinationDao().getAllDestinationsList()
+        val localIds = localList.map { it.id }.toSet()
+        val remoteIds = mutableSetOf<Long>()
+
+        for (rec in remoteRecords) {
+            if (isClearingInProgress) return
+            val id = rec.entity.id
+            remoteIds.add(id)
+            if (syncStore.isPendingDelete(SyncEntityType.DESTINATION, id)) {
+                continue
+            }
+            if (syncStore.isPendingPush(SyncEntityType.DESTINATION, id) && localIds.contains(id)) {
+                continue
+            }
+            database.destinationDao().insertDestination(rec.entity)
+            syncStore.markKnownCloud(SyncEntityType.DESTINATION, id)
+        }
+
+        if (isAuthoritativeServerSnapshot) {
+            for (ld in localList) {
+                if (!remoteIds.contains(ld.id)) {
+                    if (syncStore.isKnownCloud(SyncEntityType.DESTINATION, ld.id) &&
+                        !syncStore.isPendingPush(SyncEntityType.DESTINATION, ld.id)
+                    ) {
+                        database.destinationDao().deleteDestinationById(ld.id)
+                        syncStore.markRemovedFromCloud(SyncEntityType.DESTINATION, ld.id)
+                    }
+                }
+            }
+        }
+    }
+
+    // ==================== Diagnostic Utility ====================
+
     suspend fun runComprehensiveDiagnostic(): FirestoreDiagnosticReport = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
         val logList = mutableListOf<String>()
@@ -523,8 +751,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         }
 
         log("========== بدء الفحص الشامل لاتصال وقواعد Firestore ==========")
-        
-        // 1. Authentication Status Check
+
         var authUid: String? = null
         var isAnonymous = false
         try {
@@ -537,7 +764,6 @@ class FirebaseSyncManager(private val database: AppDatabase) {
             log("1. تنبيه المصادقة: ${e.message}", isError = true)
         }
 
-        // 2. Test Connection & Read Permissions
         var readSuccess = false
         var readErrMsg: String? = null
         var readCount = 0
@@ -545,7 +771,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         try {
             log("2. فحص صلاحية القراءة (Read Permission Test)...")
             val snapshot = withTimeoutOrNull(3000) {
-                firestore.collection("products").limit(5).get().await()
+                firestore.collection("products").limit(5).get(Source.SERVER).await()
             }
             if (snapshot != null) {
                 readSuccess = true
@@ -554,12 +780,11 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 log("   ✓ نجحت القراءة عبر Firestore SDK. تم جلب $readCount مستندات.")
             } else {
                 log("   ! مهلة محرك Firestore SDK. جاري الفحص عبر محرك REST المباشر...")
-                val restResponse = makeRestRequest("GET", "products", null, null)
-                if (restResponse != null) {
+                val restDocs = fetchAllRestDocuments("products")
+                if (restDocs != null) {
                     readSuccess = true
                     engine = "Firestore REST Fallback Engine"
-                    val json = JSONObject(restResponse)
-                    readCount = json.optJSONArray("documents")?.length() ?: 0
+                    readCount = restDocs.size
                     log("   ✓ نجحت القراءة عبر Firestore REST API. تم جلب $readCount مستندات.")
                 } else {
                     readSuccess = false
@@ -577,7 +802,6 @@ class FirebaseSyncManager(private val database: AppDatabase) {
             }
         }
 
-        // 3. Test Write & Delete Permissions (Clean Probe)
         var writeSuccess = false
         var writeErrMsg: String? = null
         var writeVerifiedWithCleanup = false
@@ -589,7 +813,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 "timestamp" to System.currentTimeMillis(),
                 "test" to "diagnostic_ping"
             )
-            
+
             var sdkWriteOk = false
             try {
                 withTimeoutOrNull(3000) {
@@ -607,7 +831,6 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 writeVerifiedWithCleanup = true
                 log("   ✓ نجحت الكتابة والحذف الفوري عبر Firestore SDK.")
             } else {
-                // Fallback test via REST
                 log("   جاري اختبار الكتابة عبر محرك REST المباشر...")
                 val probeJson = JSONObject().apply {
                     put("fields", JSONObject().apply {
@@ -637,7 +860,6 @@ class FirebaseSyncManager(private val database: AppDatabase) {
             }
         }
 
-        // 4. Verify & Ensure Collection Listeners
         log("4. فحص تهيئة مستمعات المجموعات في طبقة المستودع (Collection Listeners)...")
         ensureCollectionListenersActive()
         val currentListeners = _activeListenersMap.value
@@ -694,154 +916,31 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         report
     }
 
-    // Pull ALL collections from Firestore into local Room database
-    // Returns true if remote catalog (products) was found in Firestore
+    // ==================== SDK Pull Engine ====================
+
     suspend fun pullAllFromCloud(): Boolean = withContext(Dispatchers.IO) {
         if (isClearingInProgress) return@withContext false
         _isSyncing.value = true
         _syncError.value = null
         try {
-            ensureAuth()
-
-            // 1. Pull Products & Prune Local Orphans
-            val prodDocs = firestore.collection("products").get().await()
-            val remoteProductIds = mutableSetOf<Long>()
-            for (doc in prodDocs.documents) {
-                val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                remoteProductIds.add(id)
-                val isActive = doc.getBoolean("active") ?: true
-                if (isActive) {
-                    val entity = ProductEntity(
-                        id = id,
-                        nameArabic = doc.getString("nameArabic") ?: "",
-                        nameFrench = doc.getString("nameFrench") ?: "",
-                        category = doc.getString("category") ?: "مصحف شريف",
-                        formatType = doc.getString("formatType") ?: "عادي",
-                        unit = doc.getString("unit") ?: "نسخة",
-                        packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 1,
-                        minimumStock = doc.getLong("minimumStock")?.toInt() ?: 0,
-                        initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
-                        notes = doc.getString("notes") ?: "",
-                        active = true
-                    )
-                    database.productDao().insertProduct(entity)
-                } else {
-                    database.productDao().deleteProductById(id)
-                }
+            syncMutex.withLock {
+                pullAllFromCloudLocked()
             }
-            for (lp in database.productDao().getAllProductsList()) {
-                if (!remoteProductIds.contains(lp.id)) {
-                    database.productDao().deleteProductById(lp.id)
-                }
-            }
-
-            // 2. Pull Variants & Prune Local Orphans
-            val varDocs = firestore.collection("variants").get().await()
-            val remoteVariantIds = mutableSetOf<Long>()
-            for (doc in varDocs.documents) {
-                val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                remoteVariantIds.add(id)
-                val isActive = doc.getBoolean("active") ?: true
-                if (isActive) {
-                    val entity = ProductVariantEntity(
-                        id = id,
-                        productId = doc.getLong("productId") ?: 0L,
-                        nameArabic = doc.getString("nameArabic") ?: "",
-                        nameFrench = doc.getString("nameFrench") ?: "",
-                        code = doc.getString("code") ?: "",
-                        initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
-                        minimumStock = doc.getLong("minimumStock")?.toInt() ?: 20,
-                        packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 10,
-                        notes = doc.getString("notes") ?: "",
-                        active = true
-                    )
-                    database.productVariantDao().insertVariant(entity)
-                } else {
-                    database.productVariantDao().deleteVariantById(id)
-                }
-            }
-            for (lv in database.productVariantDao().getAllVariantsList()) {
-                if (!remoteVariantIds.contains(lv.id)) {
-                    database.productVariantDao().deleteVariantById(lv.id)
-                }
-            }
-
-            // 3. Pull Movements & Prune Local Orphans
-            val moveDocs = firestore.collection("movements").get().await()
-            val remoteMovementIds = mutableSetOf<Long>()
-            for (doc in moveDocs.documents) {
-                val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                remoteMovementIds.add(id)
-                val isDel = doc.getBoolean("isDeleted") ?: false
-                if (!isDel) {
-                    val entity = StockMovementEntity(
-                        id = id,
-                        productId = doc.getLong("productId") ?: 0L,
-                        variantId = doc.getLong("variantId"),
-                        movementType = doc.getString("movementType") ?: "STOCK_IN",
-                        quantity = doc.getLong("quantity")?.toInt() ?: 0,
-                        packageCount = doc.getLong("packageCount")?.toInt() ?: 0,
-                        dateMillis = doc.getLong("dateMillis") ?: System.currentTimeMillis(),
-                        dateFormatted = doc.getString("dateFormatted") ?: "",
-                        source = doc.getString("source") ?: "",
-                        destinationId = doc.getLong("destinationId"),
-                        destinationName = doc.getString("destinationName") ?: "",
-                        destinationType = doc.getString("destinationType") ?: "",
-                        reason = doc.getString("reason") ?: "",
-                        responsiblePerson = doc.getString("responsiblePerson") ?: "",
-                        referenceNumber = doc.getString("referenceNumber") ?: "",
-                        notes = doc.getString("notes") ?: "",
-                        isReversed = doc.getBoolean("isReversed") ?: false,
-                        reversedByMovementId = doc.getLong("reversedByMovementId"),
-                        isDeleted = false
-                    )
-                    database.stockMovementDao().insertMovement(entity)
-                } else {
-                    database.stockMovementDao().deleteMovementById(id)
-                }
-            }
-            for (lm in database.stockMovementDao().getAllMovementsList()) {
-                if (!remoteMovementIds.contains(lm.id)) {
-                    database.stockMovementDao().deleteMovementById(lm.id)
-                }
-            }
-
-            // 4. Pull Destinations & Prune Local Orphans
-            val destDocs = firestore.collection("destinations").get().await()
-            val remoteDestinationIds = mutableSetOf<Long>()
-            for (doc in destDocs.documents) {
-                val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: continue
-                remoteDestinationIds.add(id)
-                val entity = DestinationEntity(
-                    id = id,
-                    name = doc.getString("name") ?: "",
-                    type = doc.getString("type") ?: "مسجد",
-                    commune = doc.getString("commune") ?: "",
-                    province = doc.getString("province") ?: "",
-                    address = doc.getString("address") ?: "",
-                    contactPerson = doc.getString("contactPerson") ?: "",
-                    phone = doc.getString("phone") ?: ""
-                )
-                database.destinationDao().insertDestination(entity)
-            }
-            for (ld in database.destinationDao().getAllDestinationsList()) {
-                if (!remoteDestinationIds.contains(ld.id)) {
-                    database.destinationDao().deleteDestinationById(ld.id)
-                }
-            }
-
-            _lastSyncTimestamp.value = System.currentTimeMillis()
-            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
-            !prodDocs.isEmpty
         } catch (e: Exception) {
-            val restPulled = pullAllFromRestApi()
+            val restPulled = syncMutex.withLock {
+                pullAllFromRestApiLocked()
+            }
             if (restPulled) {
                 _lastSyncTimestamp.value = System.currentTimeMillis()
                 _syncDiagnostic.value = CloudSyncDiagnostic.Connected
                 _syncError.value = null
+                isPermissionDenied = false
                 true
             } else {
                 val diag = parseErrorToDiagnostic(e)
+                if (diag is CloudSyncDiagnostic.PermissionDenied) {
+                    isPermissionDenied = true
+                }
                 _syncDiagnostic.value = diag
                 _syncError.value = e.localizedMessage ?: e.message
                 Log.e("FirebaseSync", "pullAllFromCloud error", e)
@@ -852,11 +951,131 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         }
     }
 
+    private suspend fun pullAllFromCloudLocked(): Boolean {
+        if (isClearingInProgress) return false
+        ensureAuth()
+
+        // Always query Source.SERVER so empty local offline cache never deletes Room records
+        val prodDocs = firestore.collection("products").get(Source.SERVER).await()
+        val varDocs = firestore.collection("variants").get(Source.SERVER).await()
+        val moveDocs = firestore.collection("movements").get(Source.SERVER).await()
+        val destDocs = firestore.collection("destinations").get(Source.SERVER).await()
+
+        val prodRecords = prodDocs.documents.mapNotNull { doc ->
+            val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: return@mapNotNull null
+            val isActive = doc.getBoolean("active") ?: true
+            val updatedAt = doc.getLong("updatedAt") ?: 0L
+            RemoteProductRecord(
+                entity = ProductEntity(
+                    id = id,
+                    nameArabic = doc.getString("nameArabic") ?: "",
+                    nameFrench = doc.getString("nameFrench") ?: "",
+                    category = doc.getString("category") ?: "مصحف شريف",
+                    formatType = doc.getString("formatType") ?: "عادي",
+                    unit = doc.getString("unit") ?: "نسخة",
+                    packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 1,
+                    minimumStock = doc.getLong("minimumStock")?.toInt() ?: 0,
+                    initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
+                    notes = doc.getString("notes") ?: "",
+                    active = isActive,
+                    updatedAt = if (updatedAt > 0L) updatedAt else System.currentTimeMillis()
+                ),
+                updatedAt = updatedAt
+            )
+        }
+        mergeRemoteProducts(prodRecords, isAuthoritativeServerSnapshot = !prodDocs.metadata.isFromCache && !prodDocs.metadata.hasPendingWrites())
+
+        val varRecords = varDocs.documents.mapNotNull { doc ->
+            val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: return@mapNotNull null
+            val isActive = doc.getBoolean("active") ?: true
+            val updatedAt = doc.getLong("updatedAt") ?: 0L
+            RemoteVariantRecord(
+                entity = ProductVariantEntity(
+                    id = id,
+                    productId = doc.getLong("productId") ?: 0L,
+                    nameArabic = doc.getString("nameArabic") ?: "",
+                    nameFrench = doc.getString("nameFrench") ?: "",
+                    code = doc.getString("code") ?: "",
+                    initialStock = doc.getLong("initialStock")?.toInt() ?: 0,
+                    minimumStock = doc.getLong("minimumStock")?.toInt() ?: 20,
+                    packageQuantity = doc.getLong("packageQuantity")?.toInt() ?: 10,
+                    notes = doc.getString("notes") ?: "",
+                    active = isActive
+                ),
+                updatedAt = updatedAt
+            )
+        }
+        mergeRemoteVariants(varRecords, isAuthoritativeServerSnapshot = !varDocs.metadata.isFromCache && !varDocs.metadata.hasPendingWrites())
+
+        val moveRecords = moveDocs.documents.mapNotNull { doc ->
+            val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: return@mapNotNull null
+            val isDel = doc.getBoolean("isDeleted") ?: false
+            val updatedAt = doc.getLong("updatedAt") ?: 0L
+            val vId = doc.getLong("variantId")
+            val dId = doc.getLong("destinationId")
+            val revId = doc.getLong("reversedByMovementId")
+            RemoteMovementRecord(
+                entity = StockMovementEntity(
+                    id = id,
+                    productId = doc.getLong("productId") ?: 0L,
+                    variantId = if (vId != null && vId > 0) vId else null,
+                    movementType = doc.getString("movementType") ?: "STOCK_IN",
+                    quantity = doc.getLong("quantity")?.toInt() ?: 0,
+                    packageCount = doc.getLong("packageCount")?.toInt() ?: 0,
+                    dateMillis = doc.getLong("dateMillis") ?: System.currentTimeMillis(),
+                    dateFormatted = doc.getString("dateFormatted") ?: "",
+                    source = doc.getString("source") ?: "",
+                    destinationId = if (dId != null && dId > 0) dId else null,
+                    destinationName = doc.getString("destinationName") ?: "",
+                    destinationType = doc.getString("destinationType") ?: "",
+                    reason = doc.getString("reason") ?: "",
+                    responsiblePerson = doc.getString("responsiblePerson") ?: "",
+                    referenceNumber = doc.getString("referenceNumber") ?: "",
+                    notes = doc.getString("notes") ?: "",
+                    isReversed = doc.getBoolean("isReversed") ?: false,
+                    reversedByMovementId = if (revId != null && revId > 0) revId else null,
+                    isDeleted = isDel,
+                    updatedAt = if (updatedAt > 0L) updatedAt else System.currentTimeMillis()
+                ),
+                updatedAt = updatedAt
+            )
+        }
+        mergeRemoteMovements(moveRecords, isAuthoritativeServerSnapshot = !moveDocs.metadata.isFromCache && !moveDocs.metadata.hasPendingWrites())
+
+        val destRecords = destDocs.documents.mapNotNull { doc ->
+            val id = doc.getLong("id") ?: doc.id.toLongOrNull() ?: return@mapNotNull null
+            val updatedAt = doc.getLong("updatedAt") ?: 0L
+            RemoteDestinationRecord(
+                entity = DestinationEntity(
+                    id = id,
+                    name = doc.getString("name") ?: "",
+                    type = doc.getString("type") ?: "مسجد",
+                    commune = doc.getString("commune") ?: "",
+                    province = doc.getString("province") ?: "",
+                    address = doc.getString("address") ?: "",
+                    contactPerson = doc.getString("contactPerson") ?: "",
+                    phone = doc.getString("phone") ?: "",
+                    notes = doc.getString("notes") ?: ""
+                ),
+                updatedAt = updatedAt
+            )
+        }
+        mergeRemoteDestinations(destRecords, isAuthoritativeServerSnapshot = !destDocs.metadata.isFromCache && !destDocs.metadata.hasPendingWrites())
+
+        _lastSyncTimestamp.value = System.currentTimeMillis()
+        _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+        _syncError.value = null
+        isPermissionDenied = false
+        return true
+    }
+
     // ==================== REST API Engine ====================
+
     private val apiKey = "AIzaSyCr1ToMuR2ejNwkRmnRcRU0zUZdcIfnUQM"
     private val restBaseUrl = "https://firestore.googleapis.com/v1/projects/mushaf-stock/databases/(default)/documents"
 
-    private fun makeRestRequest(method: String, collection: String, docId: String?, jsonBody: String?): String? {
+    private suspend fun makeRestRequest(method: String, collection: String, docId: String?, jsonBody: String?): String? {
+        val idToken = getAuthIdToken()
         var conn: java.net.HttpURLConnection? = null
         try {
             val urlString = if (docId != null) {
@@ -870,6 +1089,9 @@ class FirebaseSyncManager(private val database: AppDatabase) {
             conn = url.openConnection() as java.net.HttpURLConnection
             conn.connectTimeout = 7000
             conn.readTimeout = 7000
+            if (!idToken.isNullOrBlank()) {
+                conn.setRequestProperty("Authorization", "Bearer $idToken")
+            }
             if (method.equals("PATCH", ignoreCase = true)) {
                 conn.requestMethod = "POST"
                 conn.setRequestProperty("X-HTTP-Method-Override", "PATCH")
@@ -891,6 +1113,9 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 conn.inputStream.bufferedReader().use { it.readText() }
             } else {
                 val err = conn.errorStream?.bufferedReader()?.use { it.readText() }
+                if (code == 401 || code == 403) {
+                    isPermissionDenied = true
+                }
                 Log.w("FirebaseSync", "REST $method $collection/$docId failed code $code: $err")
                 null
             }
@@ -900,6 +1125,72 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         } finally {
             conn?.disconnect()
         }
+    }
+
+    /**
+     * Fetches ALL pages of a Firestore collection via REST.
+     * Returns null if ANY page request fails or returns invalid JSON, so callers NEVER prune local data on error.
+     */
+    private suspend fun fetchAllRestDocuments(collection: String): List<JSONObject>? {
+        val allDocs = mutableListOf<JSONObject>()
+        var pageToken: String? = null
+        var pageSafetyCounter = 0
+
+        while (pageSafetyCounter < 50) {
+            pageSafetyCounter++
+            val path = if (pageToken.isNullOrBlank()) {
+                "$collection?pageSize=300"
+            } else {
+                "$collection?pageSize=300&pageToken=${URLEncoder.encode(pageToken, "UTF-8")}"
+            }
+            val responseStr = makeRestRequest("GET", path, null, null) ?: return null
+            val json = try {
+                JSONObject(responseStr)
+            } catch (e: Exception) {
+                Log.e("FirebaseSync", "Invalid REST JSON for $collection", e)
+                return null
+            }
+            val docs = json.optJSONArray("documents")
+            if (docs != null) {
+                for (i in 0 until docs.length()) {
+                    allDocs.add(docs.getJSONObject(i))
+                }
+            }
+            val next = json.optString("nextPageToken", "")
+            if (next.isBlank()) {
+                break
+            }
+            pageToken = next
+        }
+        return allDocs
+    }
+
+    private fun optFirestoreLong(fields: JSONObject, key: String): Long? {
+        val obj = fields.optJSONObject(key) ?: return null
+        if (obj.has("nullValue")) return null
+        if (obj.has("integerValue")) {
+            return obj.optString("integerValue").toLongOrNull() ?: obj.optLong("integerValue", 0L)
+        }
+        if (obj.has("doubleValue")) {
+            return obj.optDouble("doubleValue").toLong()
+        }
+        return null
+    }
+
+    private fun optFirestoreInt(fields: JSONObject, key: String): Int? {
+        return optFirestoreLong(fields, key)?.toInt()
+    }
+
+    private fun optFirestoreString(fields: JSONObject, key: String): String? {
+        val obj = fields.optJSONObject(key) ?: return null
+        if (obj.has("nullValue")) return null
+        return if (obj.has("stringValue")) obj.optString("stringValue") else null
+    }
+
+    private fun optFirestoreBoolean(fields: JSONObject, key: String): Boolean? {
+        val obj = fields.optJSONObject(key) ?: return null
+        if (obj.has("nullValue")) return null
+        return if (obj.has("booleanValue")) obj.optBoolean("booleanValue") else null
     }
 
     private fun buildProductJson(p: ProductEntity): String {
@@ -916,7 +1207,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         fields.put("initialStock", JSONObject().put("integerValue", p.initialStock.toString()))
         fields.put("notes", JSONObject().put("stringValue", p.notes))
         fields.put("active", JSONObject().put("booleanValue", p.active))
-        fields.put("updatedAt", JSONObject().put("integerValue", System.currentTimeMillis().toString()))
+        fields.put("updatedAt", JSONObject().put("integerValue", p.updatedAt.coerceAtLeast(System.currentTimeMillis()).toString()))
         root.put("fields", fields)
         return root.toString()
     }
@@ -973,7 +1264,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
             fields.put("reversedByMovementId", JSONObject().put("nullValue", JSONObject.NULL))
         }
         fields.put("isDeleted", JSONObject().put("booleanValue", m.isDeleted))
-        fields.put("updatedAt", JSONObject().put("integerValue", System.currentTimeMillis().toString()))
+        fields.put("updatedAt", JSONObject().put("integerValue", m.updatedAt.coerceAtLeast(System.currentTimeMillis()).toString()))
         root.put("fields", fields)
         return root.toString()
     }
@@ -1009,9 +1300,12 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         return root.toString()
     }
 
-    // Push local data to Firestore (Dual Engine: SDK with timeout + REST fallback)
-    suspend fun pushProduct(product: ProductEntity) = withContext(Dispatchers.IO) {
-        if (isClearingInProgress) return@withContext
+    // ==================== Push & Delete Operations ====================
+
+    suspend fun pushProduct(product: ProductEntity): Boolean = withContext(Dispatchers.IO) {
+        if (isClearingInProgress) return@withContext false
+        syncStore.markPendingPush(SyncEntityType.PRODUCT, product.id)
+
         val sdkSuccess = try {
             withTimeoutOrNull(2500) {
                 ensureAuth()
@@ -1027,7 +1321,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                     "initialStock" to product.initialStock,
                     "notes" to product.notes,
                     "active" to product.active,
-                    "updatedAt" to System.currentTimeMillis()
+                    "updatedAt" to product.updatedAt.coerceAtLeast(System.currentTimeMillis())
                 )
                 firestore.collection("products").document(product.id.toString()).set(data, SetOptions.merge()).await()
                 true
@@ -1035,54 +1329,55 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         } catch (e: Exception) {
             false
         }
-        if (!sdkSuccess && !isClearingInProgress) {
-            makeRestRequest("PATCH", "products", product.id.toString(), buildProductJson(product))
+
+        val restSuccess = if (!sdkSuccess && !isClearingInProgress) {
+            makeRestRequest("PATCH", "products", product.id.toString(), buildProductJson(product)) != null
+        } else {
+            false
         }
-        _syncDiagnostic.value = CloudSyncDiagnostic.Connected
-        _syncError.value = null
+
+        val succeeded = sdkSuccess || restSuccess
+        if (succeeded) {
+            syncStore.markPushSucceeded(SyncEntityType.PRODUCT, product.id)
+            isPermissionDenied = false
+            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+            _syncError.value = null
+        }
+        succeeded
     }
 
-    suspend fun deleteProduct(productId: Long) = withContext(Dispatchers.IO) {
-        if (isClearingInProgress) return@withContext
+    suspend fun deleteProduct(productId: Long): Boolean = withContext(Dispatchers.IO) {
+        if (isClearingInProgress) return@withContext false
+        syncStore.markPendingDelete(SyncEntityType.PRODUCT, productId)
         val collectionPath = "products"
         val docId = productId.toString()
-        val uid = auth.currentUser?.uid ?: "anonymous"
-        Log.i("FirebaseSyncDiagnostic", "[DELETE START] entityId=$productId, docId=$docId, collection=$collectionPath, uid=$uid")
 
         var success = false
-        var lastError: String? = null
         try {
             ensureAuth()
-            withTimeoutOrNull(5000) {
+            val done = withTimeoutOrNull(5000) {
                 firestore.collection(collectionPath).document(docId).delete().await()
-            }
-            success = true
-            Log.i("FirebaseSyncDiagnostic", "[DELETE SUCCESS (SDK)] docId=$docId, collection=$collectionPath")
+                true
+            } ?: false
+            success = done
         } catch (e: Exception) {
-            lastError = e.message
-            Log.e("FirebaseSyncDiagnostic", "[DELETE ERROR (SDK)] docId=$docId, error=$lastError")
+            Log.e("FirebaseSyncDiagnostic", "[DELETE ERROR (SDK)] docId=$docId, error=${e.message}")
         }
 
         if (!success) {
-            val restRes = makeRestRequest("DELETE", collectionPath, docId, null)
-            if (restRes != null) {
-                success = true
-                Log.i("FirebaseSyncDiagnostic", "[DELETE SUCCESS (REST)] docId=$docId, collection=$collectionPath")
-            } else {
-                Log.e("FirebaseSyncDiagnostic", "[DELETE ERROR (REST)] docId=$docId failed completely")
-            }
+            success = makeRestRequest("DELETE", collectionPath, docId, null) != null
         }
 
-        try {
-            val countSnap = firestore.collection(collectionPath).get().await()
-            Log.i("FirebaseSyncDiagnostic", "[RESULTING RECORDS] collection=$collectionPath, remainingCount=${countSnap.size()}")
-        } catch (e: Exception) {
-            Log.w("FirebaseSyncDiagnostic", "[RESULTING RECORDS] failed to count: ${e.message}")
+        if (success) {
+            syncStore.markDeleteSucceeded(SyncEntityType.PRODUCT, productId)
         }
+        success
     }
 
-    suspend fun pushVariant(variant: ProductVariantEntity) = withContext(Dispatchers.IO) {
-        if (isClearingInProgress) return@withContext
+    suspend fun pushVariant(variant: ProductVariantEntity): Boolean = withContext(Dispatchers.IO) {
+        if (isClearingInProgress) return@withContext false
+        syncStore.markPendingPush(SyncEntityType.VARIANT, variant.id)
+
         val sdkSuccess = try {
             withTimeoutOrNull(2500) {
                 ensureAuth()
@@ -1105,48 +1400,55 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         } catch (e: Exception) {
             false
         }
-        if (!sdkSuccess && !isClearingInProgress) {
-            makeRestRequest("PATCH", "variants", variant.id.toString(), buildVariantJson(variant))
+
+        val restSuccess = if (!sdkSuccess && !isClearingInProgress) {
+            makeRestRequest("PATCH", "variants", variant.id.toString(), buildVariantJson(variant)) != null
+        } else {
+            false
         }
-        _syncDiagnostic.value = CloudSyncDiagnostic.Connected
-        _syncError.value = null
+
+        val succeeded = sdkSuccess || restSuccess
+        if (succeeded) {
+            syncStore.markPushSucceeded(SyncEntityType.VARIANT, variant.id)
+            isPermissionDenied = false
+            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+            _syncError.value = null
+        }
+        succeeded
     }
 
-    suspend fun deleteVariant(variantId: Long) = withContext(Dispatchers.IO) {
-        if (isClearingInProgress) return@withContext
+    suspend fun deleteVariant(variantId: Long): Boolean = withContext(Dispatchers.IO) {
+        if (isClearingInProgress) return@withContext false
+        syncStore.markPendingDelete(SyncEntityType.VARIANT, variantId)
         val collectionPath = "variants"
         val docId = variantId.toString()
-        val uid = auth.currentUser?.uid ?: "anonymous"
-        Log.i("FirebaseSyncDiagnostic", "[DELETE START] entityId=$variantId, docId=$docId, collection=$collectionPath, uid=$uid")
 
         var success = false
         try {
             ensureAuth()
-            withTimeoutOrNull(5000) {
+            val done = withTimeoutOrNull(5000) {
                 firestore.collection(collectionPath).document(docId).delete().await()
-            }
-            success = true
-            Log.i("FirebaseSyncDiagnostic", "[DELETE SUCCESS (SDK)] docId=$docId, collection=$collectionPath")
+                true
+            } ?: false
+            success = done
         } catch (e: Exception) {
             Log.e("FirebaseSyncDiagnostic", "[DELETE ERROR (SDK)] docId=$docId, error=${e.message}")
         }
 
         if (!success) {
-            val restRes = makeRestRequest("DELETE", collectionPath, docId, null)
-            if (restRes != null) {
-                success = true
-                Log.i("FirebaseSyncDiagnostic", "[DELETE SUCCESS (REST)] docId=$docId, collection=$collectionPath")
-            }
+            success = makeRestRequest("DELETE", collectionPath, docId, null) != null
         }
 
-        try {
-            val countSnap = firestore.collection(collectionPath).get().await()
-            Log.i("FirebaseSyncDiagnostic", "[RESULTING RECORDS] collection=$collectionPath, remainingCount=${countSnap.size()}")
-        } catch (e: Exception) {}
+        if (success) {
+            syncStore.markDeleteSucceeded(SyncEntityType.VARIANT, variantId)
+        }
+        success
     }
 
-    suspend fun pushMovement(movement: StockMovementEntity) = withContext(Dispatchers.IO) {
-        if (isClearingInProgress) return@withContext
+    suspend fun pushMovement(movement: StockMovementEntity): Boolean = withContext(Dispatchers.IO) {
+        if (isClearingInProgress) return@withContext false
+        syncStore.markPendingPush(SyncEntityType.MOVEMENT, movement.id)
+
         val sdkSuccess = try {
             withTimeoutOrNull(2500) {
                 ensureAuth()
@@ -1170,7 +1472,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                     "isReversed" to movement.isReversed,
                     "reversedByMovementId" to movement.reversedByMovementId,
                     "isDeleted" to movement.isDeleted,
-                    "updatedAt" to System.currentTimeMillis()
+                    "updatedAt" to movement.updatedAt.coerceAtLeast(System.currentTimeMillis())
                 )
                 firestore.collection("movements").document(movement.id.toString()).set(data, SetOptions.merge()).await()
                 true
@@ -1178,48 +1480,55 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         } catch (e: Exception) {
             false
         }
-        if (!sdkSuccess && !isClearingInProgress) {
-            makeRestRequest("PATCH", "movements", movement.id.toString(), buildMovementJson(movement))
+
+        val restSuccess = if (!sdkSuccess && !isClearingInProgress) {
+            makeRestRequest("PATCH", "movements", movement.id.toString(), buildMovementJson(movement)) != null
+        } else {
+            false
         }
-        _syncDiagnostic.value = CloudSyncDiagnostic.Connected
-        _syncError.value = null
+
+        val succeeded = sdkSuccess || restSuccess
+        if (succeeded) {
+            syncStore.markPushSucceeded(SyncEntityType.MOVEMENT, movement.id)
+            isPermissionDenied = false
+            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+            _syncError.value = null
+        }
+        succeeded
     }
 
-    suspend fun deleteMovement(movementId: Long) = withContext(Dispatchers.IO) {
-        if (isClearingInProgress) return@withContext
+    suspend fun deleteMovement(movementId: Long): Boolean = withContext(Dispatchers.IO) {
+        if (isClearingInProgress) return@withContext false
+        syncStore.markPendingDelete(SyncEntityType.MOVEMENT, movementId)
         val collectionPath = "movements"
         val docId = movementId.toString()
-        val uid = auth.currentUser?.uid ?: "anonymous"
-        Log.i("FirebaseSyncDiagnostic", "[DELETE START] entityId=$movementId, docId=$docId, collection=$collectionPath, uid=$uid")
 
         var success = false
         try {
             ensureAuth()
-            withTimeoutOrNull(5000) {
+            val done = withTimeoutOrNull(5000) {
                 firestore.collection(collectionPath).document(docId).delete().await()
-            }
-            success = true
-            Log.i("FirebaseSyncDiagnostic", "[DELETE SUCCESS (SDK)] docId=$docId, collection=$collectionPath")
+                true
+            } ?: false
+            success = done
         } catch (e: Exception) {
             Log.e("FirebaseSyncDiagnostic", "[DELETE ERROR (SDK)] docId=$docId, error=${e.message}")
         }
 
         if (!success) {
-            val restRes = makeRestRequest("DELETE", collectionPath, docId, null)
-            if (restRes != null) {
-                success = true
-                Log.i("FirebaseSyncDiagnostic", "[DELETE SUCCESS (REST)] docId=$docId, collection=$collectionPath")
-            }
+            success = makeRestRequest("DELETE", collectionPath, docId, null) != null
         }
 
-        try {
-            val countSnap = firestore.collection(collectionPath).get().await()
-            Log.i("FirebaseSyncDiagnostic", "[RESULTING RECORDS] collection=$collectionPath, remainingCount=${countSnap.size()}")
-        } catch (e: Exception) {}
+        if (success) {
+            syncStore.markDeleteSucceeded(SyncEntityType.MOVEMENT, movementId)
+        }
+        success
     }
 
-    suspend fun pushDestination(destination: DestinationEntity) = withContext(Dispatchers.IO) {
-        if (isClearingInProgress) return@withContext
+    suspend fun pushDestination(destination: DestinationEntity): Boolean = withContext(Dispatchers.IO) {
+        if (isClearingInProgress) return@withContext false
+        syncStore.markPendingPush(SyncEntityType.DESTINATION, destination.id)
+
         val sdkSuccess = try {
             withTimeoutOrNull(2500) {
                 ensureAuth()
@@ -1232,6 +1541,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                     "address" to destination.address,
                     "contactPerson" to destination.contactPerson,
                     "phone" to destination.phone,
+                    "notes" to destination.notes,
                     "updatedAt" to System.currentTimeMillis()
                 )
                 firestore.collection("destinations").document(destination.id.toString()).set(data, SetOptions.merge()).await()
@@ -1240,44 +1550,49 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         } catch (e: Exception) {
             false
         }
-        if (!sdkSuccess && !isClearingInProgress) {
-            makeRestRequest("PATCH", "destinations", destination.id.toString(), buildDestinationJson(destination))
+
+        val restSuccess = if (!sdkSuccess && !isClearingInProgress) {
+            makeRestRequest("PATCH", "destinations", destination.id.toString(), buildDestinationJson(destination)) != null
+        } else {
+            false
         }
-        _syncDiagnostic.value = CloudSyncDiagnostic.Connected
-        _syncError.value = null
+
+        val succeeded = sdkSuccess || restSuccess
+        if (succeeded) {
+            syncStore.markPushSucceeded(SyncEntityType.DESTINATION, destination.id)
+            isPermissionDenied = false
+            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+            _syncError.value = null
+        }
+        succeeded
     }
 
-    suspend fun deleteDestination(destinationId: Long) = withContext(Dispatchers.IO) {
-        if (isClearingInProgress) return@withContext
+    suspend fun deleteDestination(destinationId: Long): Boolean = withContext(Dispatchers.IO) {
+        if (isClearingInProgress) return@withContext false
+        syncStore.markPendingDelete(SyncEntityType.DESTINATION, destinationId)
         val collectionPath = "destinations"
         val docId = destinationId.toString()
-        val uid = auth.currentUser?.uid ?: "anonymous"
-        Log.i("FirebaseSyncDiagnostic", "[DELETE START] entityId=$destinationId, docId=$docId, collection=$collectionPath, uid=$uid")
 
         var success = false
         try {
             ensureAuth()
-            withTimeoutOrNull(5000) {
+            val done = withTimeoutOrNull(5000) {
                 firestore.collection(collectionPath).document(docId).delete().await()
-            }
-            success = true
-            Log.i("FirebaseSyncDiagnostic", "[DELETE SUCCESS (SDK)] docId=$docId, collection=$collectionPath")
+                true
+            } ?: false
+            success = done
         } catch (e: Exception) {
             Log.e("FirebaseSyncDiagnostic", "[DELETE ERROR (SDK)] docId=$docId, error=${e.message}")
         }
 
         if (!success) {
-            val restRes = makeRestRequest("DELETE", collectionPath, docId, null)
-            if (restRes != null) {
-                success = true
-                Log.i("FirebaseSyncDiagnostic", "[DELETE SUCCESS (REST)] docId=$docId, collection=$collectionPath")
-            }
+            success = makeRestRequest("DELETE", collectionPath, docId, null) != null
         }
 
-        try {
-            val countSnap = firestore.collection(collectionPath).get().await()
-            Log.i("FirebaseSyncDiagnostic", "[RESULTING RECORDS] collection=$collectionPath, remainingCount=${countSnap.size()}")
-        } catch (e: Exception) {}
+        if (success) {
+            syncStore.markDeleteSucceeded(SyncEntityType.DESTINATION, destinationId)
+        }
+        success
     }
 
     suspend fun syncUserProfile(profile: UserProfile) = withContext(Dispatchers.IO) {
@@ -1301,6 +1616,71 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         }
         if (!sdkSuccess) {
             makeRestRequest("PATCH", "users", docId, buildUserProfileJson(profile))
+        }
+    }
+
+    private suspend fun pushPendingLocalChanges() {
+        if (isClearingInProgress) return
+
+        // 1. Retry pending cloud deletes first
+        for (id in syncStore.getPendingDeleteIds(SyncEntityType.MOVEMENT)) {
+            deleteMovement(id)
+        }
+        for (id in syncStore.getPendingDeleteIds(SyncEntityType.VARIANT)) {
+            deleteVariant(id)
+        }
+        for (id in syncStore.getPendingDeleteIds(SyncEntityType.PRODUCT)) {
+            deleteProduct(id)
+        }
+        for (id in syncStore.getPendingDeleteIds(SyncEntityType.DESTINATION)) {
+            deleteDestination(id)
+        }
+
+        // 2. Push pending or never-synced local records
+        val products = database.productDao().getAllProductsList()
+        for (p in products) {
+            if (isClearingInProgress) return
+            if (!syncStore.isPendingDelete(SyncEntityType.PRODUCT, p.id) &&
+                (syncStore.isPendingPush(SyncEntityType.PRODUCT, p.id) || !syncStore.isKnownCloud(SyncEntityType.PRODUCT, p.id))
+            ) {
+                if (p.active) {
+                    pushProduct(p)
+                }
+            }
+        }
+
+        val variants = database.productVariantDao().getAllVariantsList()
+        for (v in variants) {
+            if (isClearingInProgress) return
+            if (!syncStore.isPendingDelete(SyncEntityType.VARIANT, v.id) &&
+                (syncStore.isPendingPush(SyncEntityType.VARIANT, v.id) || !syncStore.isKnownCloud(SyncEntityType.VARIANT, v.id))
+            ) {
+                if (v.active) {
+                    pushVariant(v)
+                }
+            }
+        }
+
+        val movements = database.stockMovementDao().getAllMovementsList()
+        for (m in movements) {
+            if (isClearingInProgress) return
+            if (!syncStore.isPendingDelete(SyncEntityType.MOVEMENT, m.id) &&
+                (syncStore.isPendingPush(SyncEntityType.MOVEMENT, m.id) || !syncStore.isKnownCloud(SyncEntityType.MOVEMENT, m.id))
+            ) {
+                if (!m.isDeleted || syncStore.isPendingPush(SyncEntityType.MOVEMENT, m.id)) {
+                    pushMovement(m)
+                }
+            }
+        }
+
+        val destinations = database.destinationDao().getAllDestinationsList()
+        for (d in destinations) {
+            if (isClearingInProgress) return
+            if (!syncStore.isPendingDelete(SyncEntityType.DESTINATION, d.id) &&
+                (syncStore.isPendingPush(SyncEntityType.DESTINATION, d.id) || !syncStore.isKnownCloud(SyncEntityType.DESTINATION, d.id))
+            ) {
+                pushDestination(d)
+            }
         }
     }
 
@@ -1334,7 +1714,6 @@ class FirebaseSyncManager(private val database: AppDatabase) {
             ensureAuth()
             val collections = listOf("products", "variants", "movements", "destinations", "_health_probes", "items")
 
-            // Multi-pass thorough deletion until 0 documents remain in each collection
             for (col in collections) {
                 var attempts = 0
                 while (attempts < 3) {
@@ -1342,7 +1721,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                     try {
                         val snapshot = firestore.collection(col).get().await()
                         if (snapshot.isEmpty) break
-                        
+
                         val batch = firestore.batch()
                         for (doc in snapshot.documents) {
                             batch.delete(doc.reference)
@@ -1360,20 +1739,14 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                     }
                 }
 
-                // REST deletion pass
                 try {
-                    val jsonStr = makeRestRequest("GET", col, null, null)
-                    if (jsonStr != null) {
-                        val json = JSONObject(jsonStr)
-                        val docs = json.optJSONArray("documents")
-                        if (docs != null) {
-                            for (i in 0 until docs.length()) {
-                                val doc = docs.getJSONObject(i)
-                                val name = doc.optString("name")
-                                val docId = name.substringAfterLast("/")
-                                if (docId.isNotBlank()) {
-                                    makeRestRequest("DELETE", col, docId, null)
-                                }
+                    val docs = fetchAllRestDocuments(col)
+                    if (docs != null) {
+                        for (doc in docs) {
+                            val name = doc.optString("name")
+                            val docId = name.substringAfterLast("/")
+                            if (docId.isNotBlank()) {
+                                makeRestRequest("DELETE", col, docId, null)
                             }
                         }
                     }
@@ -1382,6 +1755,7 @@ class FirebaseSyncManager(private val database: AppDatabase) {
                 }
             }
 
+            syncStore.clearAll()
             _lastSyncTimestamp.value = System.currentTimeMillis()
             _syncDiagnostic.value = CloudSyncDiagnostic.Connected
             Log.d("FirebaseSync", "All cloud data successfully cleared and verified (0 remaining).")
@@ -1389,279 +1763,266 @@ class FirebaseSyncManager(private val database: AppDatabase) {
             Log.e("FirebaseSync", "clearAllCloudData critical error", e)
             throw e
         } finally {
-            // Keep isClearingInProgress true for 2 more seconds to prevent instant snapshot re-addition
-            kotlinx.coroutines.delay(2000)
+            delay(2000)
             isClearingInProgress = false
         }
     }
 
     suspend fun hardDeleteAllCollections() = clearAllCloudData()
 
-    // Pull ALL collections via REST API (Ultra reliable)
+    // ==================== REST Pull Engine (Safe Against Errors) ====================
+
     suspend fun pullAllFromRestApi(): Boolean = withContext(Dispatchers.IO) {
         if (isClearingInProgress) return@withContext false
-        try {
-            // 1. Pull Products via REST & Prune Local
-            val prodJsonStr = makeRestRequest("GET", "products", null, null)
-            val remoteProdIds = mutableSetOf<Long>()
-            if (prodJsonStr != null) {
-                val json = JSONObject(prodJsonStr)
-                val docs = json.optJSONArray("documents")
-                if (docs != null) {
-                    for (i in 0 until docs.length()) {
-                        val doc = docs.getJSONObject(i)
-                        val fields = doc.optJSONObject("fields") ?: continue
-                        val idVal = fields.optJSONObject("id")?.optLong("integerValue")
-                            ?: doc.optString("name").substringAfterLast("/").toLongOrNull() ?: continue
-                        remoteProdIds.add(idVal)
-                        val active = fields.optJSONObject("active")?.optBoolean("booleanValue") ?: true
-                        if (active) {
-                            val entity = ProductEntity(
-                                id = idVal,
-                                nameArabic = fields.optJSONObject("nameArabic")?.optString("stringValue") ?: "",
-                                nameFrench = fields.optJSONObject("nameFrench")?.optString("stringValue") ?: "",
-                                category = fields.optJSONObject("category")?.optString("stringValue") ?: "مصحف شريف",
-                                formatType = fields.optJSONObject("formatType")?.optString("stringValue") ?: "عادي",
-                                unit = fields.optJSONObject("unit")?.optString("stringValue") ?: "نسخة",
-                                packageQuantity = fields.optJSONObject("packageQuantity")?.optInt("integerValue") ?: 1,
-                                minimumStock = fields.optJSONObject("minimumStock")?.optInt("integerValue") ?: 0,
-                                initialStock = fields.optJSONObject("initialStock")?.optInt("integerValue") ?: 0,
-                                notes = fields.optJSONObject("notes")?.optString("stringValue") ?: "",
-                                active = true
-                            )
-                            database.productDao().insertProduct(entity)
-                        } else {
-                            database.productDao().deleteProductById(idVal)
-                        }
-                    }
-                }
-            }
-            for (lp in database.productDao().getAllProductsList()) {
-                if (!remoteProdIds.contains(lp.id)) {
-                    database.productDao().deleteProductById(lp.id)
-                }
-            }
-
-            // 2. Pull Variants via REST & Prune Local
-            val varJsonStr = makeRestRequest("GET", "variants", null, null)
-            val remoteVarIds = mutableSetOf<Long>()
-            if (varJsonStr != null) {
-                val json = JSONObject(varJsonStr)
-                val docs = json.optJSONArray("documents")
-                if (docs != null) {
-                    for (i in 0 until docs.length()) {
-                        val doc = docs.getJSONObject(i)
-                        val fields = doc.optJSONObject("fields") ?: continue
-                        val idVal = fields.optJSONObject("id")?.optLong("integerValue")
-                            ?: doc.optString("name").substringAfterLast("/").toLongOrNull() ?: continue
-                        remoteVarIds.add(idVal)
-                        val active = fields.optJSONObject("active")?.optBoolean("booleanValue") ?: true
-                        if (active) {
-                            val entity = ProductVariantEntity(
-                                id = idVal,
-                                productId = fields.optJSONObject("productId")?.optLong("integerValue") ?: 0L,
-                                nameArabic = fields.optJSONObject("nameArabic")?.optString("stringValue") ?: "",
-                                nameFrench = fields.optJSONObject("nameFrench")?.optString("stringValue") ?: "",
-                                code = fields.optJSONObject("code")?.optString("stringValue") ?: "",
-                                initialStock = fields.optJSONObject("initialStock")?.optInt("integerValue") ?: 0,
-                                minimumStock = fields.optJSONObject("minimumStock")?.optInt("integerValue") ?: 20,
-                                packageQuantity = fields.optJSONObject("packageQuantity")?.optInt("integerValue") ?: 10,
-                                notes = fields.optJSONObject("notes")?.optString("stringValue") ?: "",
-                                active = true
-                            )
-                            database.productVariantDao().insertVariant(entity)
-                        } else {
-                            database.productVariantDao().deleteVariantById(idVal)
-                        }
-                    }
-                }
-            }
-            for (lv in database.productVariantDao().getAllVariantsList()) {
-                if (!remoteVarIds.contains(lv.id)) {
-                    database.productVariantDao().deleteVariantById(lv.id)
-                }
-            }
-
-            // 3. Pull Movements via REST & Prune Local
-            val moveJsonStr = makeRestRequest("GET", "movements", null, null)
-            val remoteMoveIds = mutableSetOf<Long>()
-            if (moveJsonStr != null) {
-                val json = JSONObject(moveJsonStr)
-                val docs = json.optJSONArray("documents")
-                if (docs != null) {
-                    for (i in 0 until docs.length()) {
-                        val doc = docs.getJSONObject(i)
-                        val fields = doc.optJSONObject("fields") ?: continue
-                        val idVal = fields.optJSONObject("id")?.optLong("integerValue")
-                            ?: doc.optString("name").substringAfterLast("/").toLongOrNull() ?: continue
-                        val isDel = fields.optJSONObject("isDeleted")?.optBoolean("booleanValue") ?: false
-                        if (!isDel) {
-                            remoteMoveIds.add(idVal)
-                            val vId = fields.optJSONObject("variantId")?.optLong("integerValue")
-                            val entity = StockMovementEntity(
-                                id = idVal,
-                                productId = fields.optJSONObject("productId")?.optLong("integerValue") ?: 0L,
-                                variantId = if (vId != null && vId > 0) vId else null,
-                                movementType = fields.optJSONObject("movementType")?.optString("stringValue") ?: "STOCK_IN",
-                                quantity = fields.optJSONObject("quantity")?.optInt("integerValue") ?: 0,
-                                packageCount = fields.optJSONObject("packageCount")?.optInt("integerValue") ?: 0,
-                                dateMillis = fields.optJSONObject("dateMillis")?.optLong("integerValue") ?: System.currentTimeMillis(),
-                                dateFormatted = fields.optJSONObject("dateFormatted")?.optString("stringValue") ?: "",
-                                source = fields.optJSONObject("source")?.optString("stringValue") ?: "",
-                                destinationId = fields.optJSONObject("destinationId")?.optLong("integerValue"),
-                                destinationName = fields.optJSONObject("destinationName")?.optString("stringValue") ?: "",
-                                destinationType = fields.optJSONObject("destinationType")?.optString("stringValue") ?: "",
-                                reason = fields.optJSONObject("reason")?.optString("stringValue") ?: "",
-                                responsiblePerson = fields.optJSONObject("responsiblePerson")?.optString("stringValue") ?: "",
-                                referenceNumber = fields.optJSONObject("referenceNumber")?.optString("stringValue") ?: "",
-                                notes = fields.optJSONObject("notes")?.optString("stringValue") ?: "",
-                                isReversed = fields.optJSONObject("isReversed")?.optBoolean("booleanValue") ?: false,
-                                reversedByMovementId = fields.optJSONObject("reversedByMovementId")?.optLong("integerValue"),
-                                isDeleted = false
-                            )
-                            database.stockMovementDao().insertMovement(entity)
-                        } else {
-                            database.stockMovementDao().deleteMovementById(idVal)
-                        }
-                    }
-                }
-            }
-            for (lm in database.stockMovementDao().getAllMovementsList()) {
-                if (!remoteMoveIds.contains(lm.id)) {
-                    database.stockMovementDao().deleteMovementById(lm.id)
-                }
-            }
-
-            // 4. Pull Destinations via REST & Prune Local
-            val destJsonStr = makeRestRequest("GET", "destinations", null, null)
-            val remoteDestIds = mutableSetOf<Long>()
-            if (destJsonStr != null) {
-                val json = JSONObject(destJsonStr)
-                val docs = json.optJSONArray("documents")
-                if (docs != null) {
-                    for (i in 0 until docs.length()) {
-                        val doc = docs.getJSONObject(i)
-                        val fields = doc.optJSONObject("fields") ?: continue
-                        val idVal = fields.optJSONObject("id")?.optLong("integerValue")
-                            ?: doc.optString("name").substringAfterLast("/").toLongOrNull() ?: continue
-                        remoteDestIds.add(idVal)
-                        val entity = DestinationEntity(
-                            id = idVal,
-                            name = fields.optJSONObject("name")?.optString("stringValue") ?: "",
-                            type = fields.optJSONObject("type")?.optString("stringValue") ?: "مسجد",
-                            commune = fields.optJSONObject("commune")?.optString("stringValue") ?: "",
-                            province = fields.optJSONObject("province")?.optString("stringValue") ?: "",
-                            address = fields.optJSONObject("address")?.optString("stringValue") ?: "",
-                            contactPerson = fields.optJSONObject("contactPerson")?.optString("stringValue") ?: "",
-                            phone = fields.optJSONObject("phone")?.optString("stringValue") ?: "",
-                            notes = fields.optJSONObject("notes")?.optString("stringValue") ?: ""
-                        )
-                        database.destinationDao().insertDestination(entity)
-                    }
-                }
-            }
-            for (ld in database.destinationDao().getAllDestinationsList()) {
-                if (!remoteDestIds.contains(ld.id)) {
-                    database.destinationDao().deleteDestinationById(ld.id)
-                }
-            }
-
-            _lastSyncTimestamp.value = System.currentTimeMillis()
-            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
-            _syncError.value = null
-            true
-        } catch (e: Exception) {
-            Log.e("FirebaseSync", "pullAllFromRestApi error", e)
-            false
+        syncMutex.withLock {
+            pullAllFromRestApiLocked()
         }
     }
 
-    // Full Bidirectional Sync with Instant Dual-Engine guarantees
+    private suspend fun pullAllFromRestApiLocked(): Boolean {
+        return pullAllFromRestApiWithFetcher { collection ->
+            fetchAllRestDocuments(collection)
+        }
+    }
+
+    internal suspend fun pullAllFromRestApiWithFetcher(
+        fetcher: suspend (String) -> List<JSONObject>?
+    ): Boolean {
+        if (isClearingInProgress) return false
+        var allSucceeded = true
+
+        try {
+            // 1. Pull Products via REST — NEVER prune if fetcher returns null
+            val prodDocs = fetcher("products")
+            if (prodDocs != null) {
+                val remoteRecords = prodDocs.mapNotNull { doc ->
+                    val fields = doc.optJSONObject("fields") ?: return@mapNotNull null
+                    val idVal = optFirestoreLong(fields, "id")
+                        ?: doc.optString("name").substringAfterLast("/").toLongOrNull()
+                        ?: return@mapNotNull null
+                    val active = optFirestoreBoolean(fields, "active") ?: true
+                    val updatedAt = optFirestoreLong(fields, "updatedAt") ?: 0L
+                    RemoteProductRecord(
+                        entity = ProductEntity(
+                            id = idVal,
+                            nameArabic = optFirestoreString(fields, "nameArabic") ?: "",
+                            nameFrench = optFirestoreString(fields, "nameFrench") ?: "",
+                            category = optFirestoreString(fields, "category") ?: "مصحف شريف",
+                            formatType = optFirestoreString(fields, "formatType") ?: "عادي",
+                            unit = optFirestoreString(fields, "unit") ?: "نسخة",
+                            packageQuantity = optFirestoreInt(fields, "packageQuantity") ?: 1,
+                            minimumStock = optFirestoreInt(fields, "minimumStock") ?: 0,
+                            initialStock = optFirestoreInt(fields, "initialStock") ?: 0,
+                            notes = optFirestoreString(fields, "notes") ?: "",
+                            active = active,
+                            updatedAt = if (updatedAt > 0L) updatedAt else System.currentTimeMillis()
+                        ),
+                        updatedAt = updatedAt
+                    )
+                }
+                mergeRemoteProducts(remoteRecords, isAuthoritativeServerSnapshot = true)
+            } else {
+                allSucceeded = false
+            }
+
+            // 2. Pull Variants via REST
+            val varDocs = fetcher("variants")
+            if (varDocs != null) {
+                val remoteRecords = varDocs.mapNotNull { doc ->
+                    val fields = doc.optJSONObject("fields") ?: return@mapNotNull null
+                    val idVal = optFirestoreLong(fields, "id")
+                        ?: doc.optString("name").substringAfterLast("/").toLongOrNull()
+                        ?: return@mapNotNull null
+                    val active = optFirestoreBoolean(fields, "active") ?: true
+                    val updatedAt = optFirestoreLong(fields, "updatedAt") ?: 0L
+                    RemoteVariantRecord(
+                        entity = ProductVariantEntity(
+                            id = idVal,
+                            productId = optFirestoreLong(fields, "productId") ?: 0L,
+                            nameArabic = optFirestoreString(fields, "nameArabic") ?: "",
+                            nameFrench = optFirestoreString(fields, "nameFrench") ?: "",
+                            code = optFirestoreString(fields, "code") ?: "",
+                            initialStock = optFirestoreInt(fields, "initialStock") ?: 0,
+                            minimumStock = optFirestoreInt(fields, "minimumStock") ?: 20,
+                            packageQuantity = optFirestoreInt(fields, "packageQuantity") ?: 10,
+                            notes = optFirestoreString(fields, "notes") ?: "",
+                            active = active
+                        ),
+                        updatedAt = updatedAt
+                    )
+                }
+                mergeRemoteVariants(remoteRecords, isAuthoritativeServerSnapshot = true)
+            } else {
+                allSucceeded = false
+            }
+
+            // 3. Pull Movements via REST
+            val moveDocs = fetcher("movements")
+            if (moveDocs != null) {
+                val remoteRecords = moveDocs.mapNotNull { doc ->
+                    val fields = doc.optJSONObject("fields") ?: return@mapNotNull null
+                    val idVal = optFirestoreLong(fields, "id")
+                        ?: doc.optString("name").substringAfterLast("/").toLongOrNull()
+                        ?: return@mapNotNull null
+                    val isDel = optFirestoreBoolean(fields, "isDeleted") ?: false
+                    val updatedAt = optFirestoreLong(fields, "updatedAt") ?: 0L
+                    val vId = optFirestoreLong(fields, "variantId")
+                    val dId = optFirestoreLong(fields, "destinationId")
+                    val revId = optFirestoreLong(fields, "reversedByMovementId")
+                    RemoteMovementRecord(
+                        entity = StockMovementEntity(
+                            id = idVal,
+                            productId = optFirestoreLong(fields, "productId") ?: 0L,
+                            variantId = if (vId != null && vId > 0) vId else null,
+                            movementType = optFirestoreString(fields, "movementType") ?: "STOCK_IN",
+                            quantity = optFirestoreInt(fields, "quantity") ?: 0,
+                            packageCount = optFirestoreInt(fields, "packageCount") ?: 0,
+                            dateMillis = optFirestoreLong(fields, "dateMillis") ?: System.currentTimeMillis(),
+                            dateFormatted = optFirestoreString(fields, "dateFormatted") ?: "",
+                            source = optFirestoreString(fields, "source") ?: "",
+                            destinationId = if (dId != null && dId > 0) dId else null,
+                            destinationName = optFirestoreString(fields, "destinationName") ?: "",
+                            destinationType = optFirestoreString(fields, "destinationType") ?: "",
+                            reason = optFirestoreString(fields, "reason") ?: "",
+                            responsiblePerson = optFirestoreString(fields, "responsiblePerson") ?: "",
+                            referenceNumber = optFirestoreString(fields, "referenceNumber") ?: "",
+                            notes = optFirestoreString(fields, "notes") ?: "",
+                            isReversed = optFirestoreBoolean(fields, "isReversed") ?: false,
+                            reversedByMovementId = if (revId != null && revId > 0) revId else null,
+                            isDeleted = isDel,
+                            updatedAt = if (updatedAt > 0L) updatedAt else System.currentTimeMillis()
+                        ),
+                        updatedAt = updatedAt
+                    )
+                }
+                mergeRemoteMovements(remoteRecords, isAuthoritativeServerSnapshot = true)
+            } else {
+                allSucceeded = false
+            }
+
+            // 4. Pull Destinations via REST
+            val destDocs = fetcher("destinations")
+            if (destDocs != null) {
+                val remoteRecords = destDocs.mapNotNull { doc ->
+                    val fields = doc.optJSONObject("fields") ?: return@mapNotNull null
+                    val idVal = optFirestoreLong(fields, "id")
+                        ?: doc.optString("name").substringAfterLast("/").toLongOrNull()
+                        ?: return@mapNotNull null
+                    val updatedAt = optFirestoreLong(fields, "updatedAt") ?: 0L
+                    RemoteDestinationRecord(
+                        entity = DestinationEntity(
+                            id = idVal,
+                            name = optFirestoreString(fields, "name") ?: "",
+                            type = optFirestoreString(fields, "type") ?: "مسجد",
+                            commune = optFirestoreString(fields, "commune") ?: "",
+                            province = optFirestoreString(fields, "province") ?: "",
+                            address = optFirestoreString(fields, "address") ?: "",
+                            contactPerson = optFirestoreString(fields, "contactPerson") ?: "",
+                            phone = optFirestoreString(fields, "phone") ?: "",
+                            notes = optFirestoreString(fields, "notes") ?: ""
+                        ),
+                        updatedAt = updatedAt
+                    )
+                }
+                mergeRemoteDestinations(remoteRecords, isAuthoritativeServerSnapshot = true)
+            } else {
+                allSucceeded = false
+            }
+
+            if (allSucceeded) {
+                _lastSyncTimestamp.value = System.currentTimeMillis()
+                _syncDiagnostic.value = CloudSyncDiagnostic.Connected
+                _syncError.value = null
+                isPermissionDenied = false
+            }
+            return allSucceeded
+        } catch (e: Exception) {
+            Log.e("FirebaseSync", "pullAllFromRestApi error", e)
+            return false
+        }
+    }
+
+    // ==================== Bidirectional Sync ====================
+
     suspend fun fullBidirectionalSync(): Boolean = withContext(Dispatchers.IO) {
         if (isClearingInProgress) return@withContext false
         _isSyncing.value = true
         _syncError.value = null
         try {
-            // Pull remote updates as single authoritative source of truth
-            var pulled = try {
-                withTimeoutOrNull(4000) {
-                    pullAllFromCloud()
-                } ?: false
-            } catch (e: Exception) {
-                false
-            }
+            syncMutex.withLock {
+                if (isClearingInProgress) return@withLock false
 
-            if (!pulled) {
-                pulled = pullAllFromRestApi()
-            }
+                // Step 1: Push any unsynced local writes/deletes UP before pulling remote state
+                pushPendingLocalChanges()
 
-            _lastSyncTimestamp.value = System.currentTimeMillis()
-            _syncDiagnostic.value = CloudSyncDiagnostic.Connected
-            _syncError.value = null
-            true
-        } catch (e: Exception) {
-            val msg = e.localizedMessage ?: e.message ?: ""
-            if (msg.contains("PERMISSION_DENIED", ignoreCase = true) || msg.contains("Missing or insufficient permissions", ignoreCase = true)) {
-                isPermissionDenied = true
-                val diag = parseErrorToDiagnostic(e)
-                _syncDiagnostic.value = diag
-                _syncError.value = "قواعد الأمان السحابية تتطلب تسجيل الدخول. التطبيق يعمل محلياً."
-                Log.w("FirebaseSync", "Firestore rules require authentication; operating cleanly in local-first Room DB mode.")
-                false
-            } else {
-                val restPulled = pullAllFromRestApi()
-                if (restPulled) {
-                    _lastSyncTimestamp.value = System.currentTimeMillis()
-                    _syncDiagnostic.value = CloudSyncDiagnostic.Connected
-                    _syncError.value = null
-                    true
-                } else {
-                    val diag = parseErrorToDiagnostic(e)
-                    _syncDiagnostic.value = diag
-                    _syncError.value = e.localizedMessage ?: e.message
-                    Log.w("FirebaseSync", "fullBidirectionalSync notice: ${e.message}")
+                // Step 2: Pull authoritative remote state via SDK (with REST fallback only on failure/timeout)
+                var sdkError: Exception? = null
+                val sdkPulled = try {
+                    withTimeoutOrNull(5000) {
+                        pullAllFromCloudLocked()
+                    } ?: false
+                } catch (e: Exception) {
+                    sdkError = e
                     false
                 }
+
+                if (sdkPulled) {
+                    return@withLock true
+                }
+
+                val restPulled = pullAllFromRestApiLocked()
+                if (restPulled) {
+                    return@withLock true
+                }
+
+                if (sdkError != null) {
+                    val diag = parseErrorToDiagnostic(sdkError)
+                    if (diag is CloudSyncDiagnostic.PermissionDenied) {
+                        isPermissionDenied = true
+                        _syncError.value = "قواعد الأمان السحابية تتطلب تسجيل الدخول. التطبيق يعمل محلياً بأمان."
+                    } else {
+                        _syncError.value = sdkError.localizedMessage ?: sdkError.message
+                    }
+                    _syncDiagnostic.value = diag
+                }
+                false
             }
+        } catch (e: Exception) {
+            val diag = parseErrorToDiagnostic(e)
+            if (diag is CloudSyncDiagnostic.PermissionDenied) {
+                isPermissionDenied = true
+            }
+            _syncDiagnostic.value = diag
+            _syncError.value = e.localizedMessage ?: e.message
+            Log.w("FirebaseSync", "fullBidirectionalSync notice: ${e.message}")
+            false
         } finally {
             _isSyncing.value = false
         }
     }
 
-    // Diagnostic script that explicitly clears 'items' and 'products' collections in Firestore, logs sizes, and verifies zero count
     suspend fun clearAndVerifyItemsCollection(): String = withContext(Dispatchers.IO) {
         val logBuilder = StringBuilder()
         logBuilder.append("=== DIAGNOSTIC SCRIPT: CLEAR 'items' & VERIFY ZERO COUNT ===\n")
 
-        // 1. Log current size of 'items' and 'products'
-        val itemsJson = makeRestRequest("GET", "items", null, null)
-        val itemsSize = if (itemsJson != null) {
-            try { JSONObject(itemsJson).optJSONArray("documents")?.length() ?: 0 } catch (e: Exception) { 0 }
-        } else { 0 }
+        val itemsDocs = fetchAllRestDocuments("items")
+        val itemsSize = itemsDocs?.size ?: 0
         logBuilder.append("1. Current 'items' collection size in Firestore: $itemsSize\n")
 
-        val productsJson = makeRestRequest("GET", "products", null, null)
-        val productsSize = if (productsJson != null) {
-            try { JSONObject(productsJson).optJSONArray("documents")?.length() ?: 0 } catch (e: Exception) { 0 }
-        } else { 0 }
+        val productsDocs = fetchAllRestDocuments("products")
+        val productsSize = productsDocs?.size ?: 0
         logBuilder.append("2. Current 'products' collection size in Firestore: $productsSize\n")
 
-        // 2. Explicitly clear 'items', 'products', 'variants', 'movements'
         val collections = listOf("items", "products", "variants", "movements", "destinations", "_health_probes")
         for (col in collections) {
             try {
-                val jsonStr = makeRestRequest("GET", col, null, null)
-                if (jsonStr != null) {
-                    val json = JSONObject(jsonStr)
-                    val docs = json.optJSONArray("documents")
-                    if (docs != null) {
-                        for (i in 0 until docs.length()) {
-                            val doc = docs.getJSONObject(i)
-                            val name = doc.optString("name")
-                            val docId = name.substringAfterLast("/")
-                            if (docId.isNotBlank()) {
-                                makeRestRequest("DELETE", col, docId, null)
-                            }
+                val docs = fetchAllRestDocuments(col)
+                if (docs != null) {
+                    for (doc in docs) {
+                        val name = doc.optString("name")
+                        val docId = name.substringAfterLast("/")
+                        if (docId.isNotBlank()) {
+                            makeRestRequest("DELETE", col, docId, null)
                         }
                     }
                 }
@@ -1670,16 +2031,8 @@ class FirebaseSyncManager(private val database: AppDatabase) {
             }
         }
 
-        // 3. Verify zero count
-        val verifyItemsJson = makeRestRequest("GET", "items", null, null)
-        val verifyItemsSize = if (verifyItemsJson != null) {
-            try { JSONObject(verifyItemsJson).optJSONArray("documents")?.length() ?: 0 } catch (e: Exception) { 0 }
-        } else { 0 }
-
-        val verifyProductsJson = makeRestRequest("GET", "products", null, null)
-        val verifyProductsSize = if (verifyProductsJson != null) {
-            try { JSONObject(verifyProductsJson).optJSONArray("documents")?.length() ?: 0 } catch (e: Exception) { 0 }
-        } else { 0 }
+        val verifyItemsSize = fetchAllRestDocuments("items")?.size ?: 0
+        val verifyProductsSize = fetchAllRestDocuments("products")?.size ?: 0
 
         logBuilder.append("3. Verified 'items' collection size after clear: $verifyItemsSize (Target: 0)\n")
         logBuilder.append("4. Verified 'products' collection size after clear: $verifyProductsSize (Target: 0)\n")
@@ -1690,7 +2043,6 @@ class FirebaseSyncManager(private val database: AppDatabase) {
         resultStr
     }
 
-    // Start automatic background sync every 12 seconds
     private var isAutoSyncRunning = false
     fun startAutoSync() {
         if (isAutoSyncRunning) return
