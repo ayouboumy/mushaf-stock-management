@@ -37,9 +37,25 @@ jobs:
           KEY_ALIAS_SECRET: ${{ secrets.KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           KEY_PASSWORD_SECRET: ${{ secrets.KEY_PASSWORD }}
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
         run: |
           set -e
           mkdir -p app || true
+
+          # 0. Ensure app/google-services.json is present (from repo or GitHub Secrets)
+          if [ ! -f "app/google-services.json" ]; then
+            if [ -n "$GOOGLE_SERVICES_JSON" ]; then
+              echo "Restoring app/google-services.json from GOOGLE_SERVICES_JSON secret..."
+              printf '%s' "$GOOGLE_SERVICES_JSON" > app/google-services.json
+            elif [ -n "$GOOGLE_SERVICES_JSON_BASE64" ]; then
+              echo "Restoring app/google-services.json from GOOGLE_SERVICES_JSON_BASE64 secret..."
+              echo "$GOOGLE_SERVICES_JSON_BASE64" | tr -d '\r\n ' | base64 -d > app/google-services.json
+            else
+              echo "::error::CRITICAL: app/google-services.json is missing! Commit app/google-services.json to the repository or set GOOGLE_SERVICES_JSON in GitHub Secrets."
+              exit 1
+            fi
+          fi
 
           # 1. Prepare Persistent Release Keystore
           B64_DATA="${ANDROID_KEYSTORE_BASE64:-$RELEASE_KEYSTORE_BASE64}"

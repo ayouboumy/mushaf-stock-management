@@ -1,5 +1,6 @@
 package com.example.ui.auth
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
@@ -39,7 +40,6 @@ import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
-import com.example.R
 import com.example.ui.theme.EmeraldPrimary
 import com.example.ui.theme.TajawalFontFamily
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
@@ -62,6 +62,21 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
     else -> null
 }
 
+@SuppressLint("DiscouragedApi")
+private fun resolveWebClientId(context: Context): String? {
+    val resId = context.resources.getIdentifier(
+        "default_web_client_id",
+        "string",
+        context.packageName
+    )
+    if (resId == 0) return null
+    return try {
+        context.getString(resId).takeIf { it.isNotBlank() }
+    } catch (_: Exception) {
+        null
+    }
+}
+
 fun attemptAutoSignIn(
     context: Context,
     credentialManager: CredentialManager,
@@ -73,9 +88,8 @@ fun attemptAutoSignIn(
         onAuthSuccess()
         return
     }
-    val clientId = try {
-        context.getString(R.string.default_web_client_id)
-    } catch (_: Exception) {
+    val clientId = resolveWebClientId(context)
+    if (clientId == null) {
         onUnauthenticated()
         return
     }
@@ -200,10 +214,9 @@ fun onGoogleSignInClicked(
     scope: CoroutineScope,
     onAuthCancelled: () -> Unit = {}
 ) {
-    val clientId = try {
-        context.getString(R.string.default_web_client_id)
-    } catch (_: Exception) {
-        onAuthError("إعدادات Google Sign-In غير مكتملة (default_web_client_id مفقود)")
+    val clientId = resolveWebClientId(context)
+    if (clientId == null) {
+        onAuthError("إعدادات Google Sign-In غير مكتملة (ملف google-services.json أو default_web_client_id مفقود)")
         return
     }
     val activity = context.findActivity()
