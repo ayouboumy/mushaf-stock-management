@@ -1,9 +1,9 @@
 package com.example.ui
 
-import android.app.Application
 import android.content.Context
+import android.content.SharedPreferences
 import android.net.Uri
-import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.db.AppDatabase
 import com.example.data.entity.AuditLogEntity
@@ -25,6 +25,8 @@ import com.example.utils.ExcelImportHelper
 import com.example.utils.ImportRowRaw
 import com.example.utils.ReportExporter
 import com.example.utils.ValidatedImportRow
+import com.google.firebase.Firebase
+import com.google.firebase.auth.auth
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -35,7 +37,6 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -59,43 +60,98 @@ enum class AppScreen {
     SIGN_UP_ONBOARDING
 }
 
-class StockViewModel(application: Application) : AndroidViewModel(application) {
-
-    init {
-        com.example.StockApplication.initializeFirebase(application)
-    }
-
-    private val database = AppDatabase.getDatabase(application)
-    val repository = StockRepository(database)
-    private val prefs = application.getSharedPreferences("mushaf_stock_prefs", Context.MODE_PRIVATE)
-
-    // User Registration & Authentication State
-    private val isUserRegistered: Boolean
-        get() = prefs.getBoolean("user_registered", false) && (prefs.getString("user_name", "")?.isNotBlank() == true)
+class StockViewModel(
+    val repository: StockRepository,
+    private val database: AppDatabase,
+    private val prefs: SharedPreferences,
+    private val currentUserId: String
+) : ViewModel() {
 
     companion object {
         val MASTER_ADMIN_CODES = setOf("2026", "ADMIN2026", "MUSHAF2026", "ADMIN@2026")
     }
 
-    private val _currentUser = MutableStateFlow(
-        UserProfile(
-            id = prefs.getString("user_id", "") ?: "",
-            fullName = prefs.getString("user_name", "") ?: "",
-            role = prefs.getString("user_role", "") ?: "",
-            email = prefs.getString("user_email", "") ?: "",
-            phone = prefs.getString("user_phone", "") ?: "",
-            secretResetCode = "",
-            isAdmin = prefs.getBoolean("user_is_admin", false),
-            canDeleteData = prefs.getBoolean("user_can_delete", false),
-            isCloudSynced = prefs.getBoolean("user_registered", false),
-            lastSyncTime = prefs.getLong("last_sync_time", 0L),
-            isRegistered = prefs.getBoolean("user_registered", false) && (prefs.getString("user_name", "")?.isNotBlank() == true)
-        )
-    )
+    private val _currentUser = MutableStateFlow(buildInitialUserProfile())
     val currentUser: StateFlow<UserProfile> = _currentUser.asStateFlow()
 
-    // Navigation Stack - Clean Onboarding First if Not Registered
-    private val initialScreen = if (isUserRegistered) AppScreen.DASHBOARD else AppScreen.SIGN_UP_ONBOARDING
+    private fun buildInitialUserProfile(): UserProfile {
+        val authUser = try { Firebase.auth.currentUser } catch (_: Exception) { null }
+        val savedUid = prefs.getString("user_id", "") ?: ""
+        val isSameUser = savedUid == currentUserId
+
+        val pendingName = prefs.getString("pending_full_name", "")?.trim().orEmpty()
+        val pendingRole = prefs.getString("pending_job_title", "")?.trim().orEmpty()
+        val pendingPhone = prefs.getString("pending_phone", "")?.trim().orEmpty()
+        val pendingAdminCode = prefs.getString("pending_admin_code", "")?.trim().orEmpty()
+
+        val resolvedName = pendingName.ifBlank {
+            if (isSameUser) prefs.getString("user_name", "")?.trim().orEmpty() else ""
+        }.ifBlank {
+            authUser?.displayName?.trim().orEmpty()
+        }.ifBlank {
+            authUser?.email?.substringBefore("@").orEmpty()
+        }.ifBlank {
+            "المكلف بالمستودع"
+        }
+
+        val resolvedRole = pendingRole.ifBlank {
+            if (isSameUser) prefs.getString("user_role", "")?.trim().orEmpty() else ""
+        }.ifBlank {
+            "مسؤول المستودع والتسليم"
+        }
+
+        val resolvedEmail = authUser?.email?.trim().orEmpty().ifBlank {
+            if (isSameUser) prefs.getString("user_email", "")?.trim().orEmpty() else ""
+        }
+
+        val resolvedPhone = pendingPhone.ifBlank {
+            if (isSameUser) prefs.getString("user_phone", "")?.trim().orEmpty() else ""
+        }
+
+        val hasPendingAdmin = verifySecretResetCodeInternal(pendingAdminCode)
+        val resolvedIsAdmin = hasPendingAdmin || (isSameUser && prefs.getBoolean("user_is_admin", false))
+        val nowMillis = System.currentTimeMillis()
+
+        prefs.edit()
+            .putBoolean("user_registered", true)
+            .putString("user_id", currentUserId)
+            .putString("user_name", resolvedName)
+            .putString("user_role", resolvedRole)
+            .putString("user_email", resolvedEmail)
+            .putString("user_phone", resolvedPhone)
+            .putBoolean("user_is_admin", resolvedIsAdmin)
+            .putBoolean("user_can_delete", resolvedIsAdmin)
+            .putLong("last_sync_time", nowMillis)
+            .remove("pending_full_name")
+            .remove("pending_job_title")
+            .remove("pending_phone")
+            .remove("pending_admin_code")
+            .apply()
+
+        return UserProfile(
+            id = currentUserId,
+            fullName = resolvedName,
+            role = resolvedRole,
+            email = resolvedEmail,
+            phone = resolvedPhone,
+            secretResetCode = if (hasPendingAdmin) pendingAdminCode else "",
+            isAdmin = resolvedIsAdmin,
+            canDeleteData = resolvedIsAdmin,
+            isCloudSynced = true,
+            lastSyncTime = nowMillis,
+            isRegistered = true
+        )
+    }
+
+    private fun verifySecretResetCodeInternal(enteredCode: String): Boolean {
+        val configured = prefs.getString("secret_reset_code", "2026")?.trim()?.ifBlank { "2026" } ?: "2026"
+        val adminCode = prefs.getString("admin_secret_code", "2026")?.trim()?.ifBlank { "2026" } ?: "2026"
+        val trimmed = enteredCode.trim()
+        return trimmed.isNotEmpty() && (trimmed == "2026" || trimmed == configured || trimmed == adminCode)
+    }
+
+    // Navigation Stack - Authenticated sessions always start on Dashboard
+    private val initialScreen = AppScreen.DASHBOARD
     private val _currentScreen = MutableStateFlow(initialScreen)
     val currentScreen: StateFlow<AppScreen> = _currentScreen.asStateFlow()
     private val _screenStack = mutableListOf(initialScreen)
@@ -226,80 +282,8 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
     private val _cloudSyncState = MutableStateFlow(CloudSyncState.IDLE_SYNCED)
     val cloudSyncState: StateFlow<CloudSyncState> = _cloudSyncState.asStateFlow()
 
-    // Sign up / First-time user onboarding
-    fun registerAndSignIn(
-        fullName: String,
-        role: String,
-        email: String,
-        phone: String = "",
-        password: String = "",
-        adminSecretCode: String = ""
-    ) {
-        viewModelScope.launch {
-            _cloudSyncState.value = CloudSyncState.SYNCING
-            val trimmedName = fullName.trim()
-            val trimmedRole = role.trim()
-            val trimmedEmail = email.trim()
-            val trimmedPhone = phone.trim()
-            val userId = "user_${System.currentTimeMillis()}"
-
-            val isUserAdmin = verifySecretResetCode(adminSecretCode)
-
-            val profile = UserProfile(
-                id = userId,
-                fullName = trimmedName,
-                role = trimmedRole,
-                email = trimmedEmail,
-                phone = trimmedPhone,
-                secretResetCode = if (isUserAdmin) adminSecretCode.trim() else "",
-                isAdmin = isUserAdmin,
-                canDeleteData = isUserAdmin,
-                isCloudSynced = true,
-                lastSyncTime = System.currentTimeMillis(),
-                isRegistered = true
-            )
-
-            prefs.edit()
-                .putBoolean("user_registered", true)
-                .putString("user_id", userId)
-                .putString("user_name", trimmedName)
-                .putString("user_role", trimmedRole)
-                .putString("user_email", trimmedEmail)
-                .putString("user_phone", trimmedPhone)
-                .putBoolean("user_is_admin", isUserAdmin)
-                .putBoolean("user_can_delete", isUserAdmin)
-                .putLong("last_sync_time", System.currentTimeMillis())
-                .apply()
-
-            _currentUser.value = profile
-
-            // Register/Authenticate with Firebase & Sync user profile
-            try {
-                repository.syncManager.registerOrAuthUser(profile, password)
-            } catch (e: Exception) {
-                android.util.Log.e("StockViewModel", "registerOrAuthUser error", e)
-            }
-
-            // Immediately run initial cloud sync to pull live numbers from other devices
-            try {
-                repository.syncManager.fullBidirectionalSync()
-                _cloudSyncState.value = CloudSyncState.IDLE_SYNCED
-            } catch (e: Exception) {
-                android.util.Log.e("StockViewModel", "initial sync after signup error", e)
-                _cloudSyncState.value = CloudSyncState.IDLE_SYNCED
-            }
-
-            // Clear stack and navigate to Dashboard
-            _screenStack.clear()
-            _screenStack.add(AppScreen.DASHBOARD)
-            _currentScreen.value = AppScreen.DASHBOARD
-
-            val welcomeSuffix = if (isUserAdmin) " (بصلاحية المدير العام 🛡️)" else ""
-            showMessage("مرحباً بك $trimmedName$welcomeSuffix! تم تفعيل حسابك ومزامنة بيانات المخزون بنجاح.")
-        }
-    }
-
-    fun logoutOrSwitchUser() {
+    fun prepareForSignOut() {
+        repository.stopCloudSync()
         prefs.edit()
             .putBoolean("user_registered", false)
             .remove("user_name")
@@ -309,12 +293,6 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
             .remove("user_is_admin")
             .remove("user_can_delete")
             .apply()
-
-        _currentUser.value = UserProfile(isRegistered = false)
-        _screenStack.clear()
-        _screenStack.add(AppScreen.SIGN_UP_ONBOARDING)
-        _currentScreen.value = AppScreen.SIGN_UP_ONBOARDING
-        showMessage("تم تسجيل الخروج. يرجى إدخال بيانات المستخدم الجديد.")
     }
 
     fun updateActiveUserProfile(fullName: String, role: String, email: String, phone: String = "", secretResetCode: String = "") {
@@ -395,10 +373,10 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
                     showMessage("تم الاتصال بقاعدة بيانات Firestore السحابية بنجاح.")
                 }
                 is CloudSyncDiagnostic.DatabaseNotFound -> {
-                    showMessage("تنبيه: قاعدة بيانات Firestore محذوفة في Firebase Console. يرجى إنشاء قاعدة البيانات (default).")
+                    showMessage("تنبيه: تعذر الوصول إلى قاعدة بيانات Firestore السحابية المحددة.")
                 }
                 is CloudSyncDiagnostic.PermissionDenied -> {
-                    showMessage("تنبيه: تم رفض إذن الوصول لقاعدة بيانات Firestore. تحقق من قواعد الأمان Rules.")
+                    showMessage("تنبيه: تم رفض إذن الوصول لقاعدة بيانات Firestore. تحقق من تسجيل الدخول وقواعد الأمان Rules.")
                 }
                 is CloudSyncDiagnostic.NetworkError -> {
                     showMessage("تعذر الاتصال بالسحابة: تحقق من اتصال الإنترنت.")
@@ -424,10 +402,10 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
                 val diag = repository.syncManager.syncDiagnostic.value
                 val err = repository.syncManager.syncError.value
                 val errorMsg = when (diag) {
-                    is CloudSyncDiagnostic.DatabaseNotFound -> "فشلت المزامنة: قاعدة بيانات Firestore محذوفة أو غير مفعلة في مشروع Firebase."
+                    is CloudSyncDiagnostic.DatabaseNotFound -> "فشلت المزامنة: تعذر الوصول إلى قاعدة بيانات Firestore السحابية."
                     is CloudSyncDiagnostic.PermissionDenied -> "فشلت المزامنة: تم رفض الإذن من قواعد حماية Firestore."
                     is CloudSyncDiagnostic.NetworkError -> "فشلت المزامنة: لا يوجد اتصال بالإنترنت."
-                    else -> "فشلت المزامنة: ${err ?: "يرجى التحقق من إنشاء قاعدة البيانات في Firebase Console"}"
+                    else -> "فشلت المزامنة: ${err ?: "يرجى التحقق من الاتصال وحساب Google"}"
                 }
                 showMessage(errorMsg)
             }
@@ -446,8 +424,10 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         refreshNextVoucherNumber()
+        repository.startCloudSyncIfAuthenticated()
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                repository.syncManager.syncUserProfile(_currentUser.value)
                 repository.syncManager.diagnoseConnection()
                 repository.initialCloudSyncAndSeed()
             } catch (e: Exception) {
@@ -455,6 +435,11 @@ class StockViewModel(application: Application) : AndroidViewModel(application) {
             }
             generateReport()
         }
+    }
+
+    override fun onCleared() {
+        repository.stopCloudSync()
+        super.onCleared()
     }
 
     // Data streams from repository

@@ -1,0 +1,322 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: deny all unspecified paths by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidServerTimestamp(ts) {
+      return ts is timestamp && ts <= request.time;
+    }
+
+    function isValidUserProfile(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
+             (!('jobTitle' in data) || (data.jobTitle is string && data.jobTitle.size() <= 120)) &&
+             (!('email' in data) || (data.email is string && data.email.size() <= 160)) &&
+             (!('phone' in data) || (data.phone is string && data.phone.size() <= 40)) &&
+             isValidServerTimestamp(data.createdAt) &&
+             isValidServerTimestamp(data.updatedAt);
+    }
+
+    function isValidProduct(data) {
+      return data.localId is int && data.localId > 0 &&
+             data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.nameArabic is string && data.nameArabic.size() >= 1 && data.nameArabic.size() <= 200 &&
+             (!('nameFrench' in data) || (data.nameFrench is string && data.nameFrench.size() <= 200)) &&
+             data.category is string && data.category.size() >= 1 && data.category.size() <= 100 &&
+             data.formatType is string && data.formatType.size() >= 1 && data.formatType.size() <= 100 &&
+             data.unit is string && data.unit.size() >= 1 && data.unit.size() <= 60 &&
+             data.packageQuantity is int && data.packageQuantity >= 0 && data.packageQuantity <= 1000000 &&
+             data.minimumStock is int && data.minimumStock >= 0 && data.minimumStock <= 10000000 &&
+             data.initialStock is int && data.initialStock >= 0 && data.initialStock <= 100000000 &&
+             (!('notes' in data) || (data.notes is string && data.notes.size() <= 1000)) &&
+             data.active is bool &&
+             data.updatedAtMillis is int && data.updatedAtMillis >= 0 &&
+             isValidServerTimestamp(data.createdAt) &&
+             isValidServerTimestamp(data.updatedAt);
+    }
+
+    function isValidVariant(data) {
+      return data.localId is int && data.localId > 0 &&
+             data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.productId is int && data.productId > 0 &&
+             data.nameArabic is string && data.nameArabic.size() >= 1 && data.nameArabic.size() <= 200 &&
+             (!('nameFrench' in data) || (data.nameFrench is string && data.nameFrench.size() <= 200)) &&
+             (!('code' in data) || (data.code is string && data.code.size() <= 60)) &&
+             data.initialStock is int && data.initialStock >= 0 && data.initialStock <= 100000000 &&
+             data.minimumStock is int && data.minimumStock >= 0 && data.minimumStock <= 10000000 &&
+             data.packageQuantity is int && data.packageQuantity >= 0 && data.packageQuantity <= 1000000 &&
+             (!('notes' in data) || (data.notes is string && data.notes.size() <= 1000)) &&
+             data.active is bool &&
+             data.updatedAtMillis is int && data.updatedAtMillis >= 0 &&
+             isValidServerTimestamp(data.createdAt) &&
+             isValidServerTimestamp(data.updatedAt);
+    }
+
+    function isValidMovement(data) {
+      return data.localId is int && data.localId > 0 &&
+             data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.productId is int && data.productId > 0 &&
+             (!('variantId' in data) || (data.variantId is int && data.variantId >= 0)) &&
+             data.movementType is string && data.movementType in ['STOCK_IN', 'STOCK_OUT', 'ADJUSTMENT', 'OPENING_BALANCE'] &&
+             data.quantity is int && data.quantity >= -100000000 && data.quantity <= 100000000 &&
+             data.packageCount is int && data.packageCount >= 0 && data.packageCount <= 10000000 &&
+             data.dateMillis is int && data.dateMillis >= 0 &&
+             (!('dateFormatted' in data) || (data.dateFormatted is string && data.dateFormatted.size() <= 40)) &&
+             (!('source' in data) || (data.source is string && data.source.size() <= 250)) &&
+             (!('destinationId' in data) || (data.destinationId is int && data.destinationId >= 0)) &&
+             (!('destinationName' in data) || (data.destinationName is string && data.destinationName.size() <= 250)) &&
+             (!('destinationType' in data) || (data.destinationType is string && data.destinationType.size() <= 100)) &&
+             (!('reason' in data) || (data.reason is string && data.reason.size() <= 400)) &&
+             (!('responsiblePerson' in data) || (data.responsiblePerson is string && data.responsiblePerson.size() <= 200)) &&
+             (!('referenceNumber' in data) || (data.referenceNumber is string && data.referenceNumber.size() <= 120)) &&
+             (!('notes' in data) || (data.notes is string && data.notes.size() <= 1000)) &&
+             data.isReversed is bool &&
+             (!('reversedByMovementId' in data) || (data.reversedByMovementId is int && data.reversedByMovementId >= 0)) &&
+             data.isDeleted is bool &&
+             data.updatedAtMillis is int && data.updatedAtMillis >= 0 &&
+             isValidServerTimestamp(data.createdAt) &&
+             isValidServerTimestamp(data.updatedAt);
+    }
+
+    function isValidDestination(data) {
+      return data.localId is int && data.localId > 0 &&
+             data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 250 &&
+             data.type is string && data.type.size() >= 1 && data.type.size() <= 100 &&
+             (!('commune' in data) || (data.commune is string && data.commune.size() <= 150)) &&
+             (!('province' in data) || (data.province is string && data.province.size() <= 150)) &&
+             (!('address' in data) || (data.address is string && data.address.size() <= 400)) &&
+             (!('contactPerson' in data) || (data.contactPerson is string && data.contactPerson.size() <= 150)) &&
+             (!('phone' in data) || (data.phone is string && data.phone.size() <= 40)) &&
+             (!('notes' in data) || (data.notes is string && data.notes.size() <= 1000)) &&
+             data.updatedAtMillis is int && data.updatedAtMillis >= 0 &&
+             isValidServerTimestamp(data.createdAt) &&
+             isValidServerTimestamp(data.updatedAt);
+    }
+
+    function isValidHealthProbe(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.probeId is string && data.probeId.size() >= 1 && data.probeId.size() <= 100 &&
+             isValidServerTimestamp(data.createdAt);
+    }
+
+    match /users/{userId} {
+      allow list: if isOwner(userId);
+      allow get: if isOwner(userId) && isValidId(userId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'fullName', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'fullName', 'jobTitle', 'email', 'phone', 'createdAt', 'updatedAt']) &&
+                       isValidUserProfile(incoming());
+
+      allow update: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       isValidUserProfile(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'jobTitle', 'email', 'phone', 'updatedAt']);
+
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      match /products/{productId} {
+        allow list: if isOwner(userId);
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(productId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(productId) &&
+                         incoming().userId == request.auth.uid &&
+                         incoming().keys().hasAll([
+                           'localId', 'userId', 'nameArabic', 'category', 'formatType',
+                           'unit', 'packageQuantity', 'minimumStock', 'initialStock',
+                           'active', 'updatedAtMillis', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'localId', 'userId', 'nameArabic', 'nameFrench', 'category',
+                           'formatType', 'unit', 'packageQuantity', 'minimumStock',
+                           'initialStock', 'notes', 'active', 'updatedAtMillis',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidProduct(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(productId) &&
+                         isValidProduct(incoming()) &&
+                         incoming().userId == existing().userId &&
+                         incoming().localId == existing().localId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'nameArabic', 'nameFrench', 'category', 'formatType', 'unit',
+                           'packageQuantity', 'minimumStock', 'initialStock', 'notes',
+                           'active', 'updatedAtMillis', 'updatedAt'
+                         ]);
+
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(productId);
+      }
+
+      match /variants/{variantId} {
+        allow list: if isOwner(userId);
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(variantId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(variantId) &&
+                         incoming().userId == request.auth.uid &&
+                         incoming().keys().hasAll([
+                           'localId', 'userId', 'productId', 'nameArabic',
+                           'initialStock', 'minimumStock', 'packageQuantity',
+                           'active', 'updatedAtMillis', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'localId', 'userId', 'productId', 'nameArabic', 'nameFrench',
+                           'code', 'initialStock', 'minimumStock', 'packageQuantity',
+                           'notes', 'active', 'updatedAtMillis', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidVariant(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(variantId) &&
+                         isValidVariant(incoming()) &&
+                         incoming().userId == existing().userId &&
+                         incoming().localId == existing().localId &&
+                         incoming().productId == existing().productId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'nameArabic', 'nameFrench', 'code', 'initialStock',
+                           'minimumStock', 'packageQuantity', 'notes', 'active',
+                           'updatedAtMillis', 'updatedAt'
+                         ]);
+
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(variantId);
+      }
+
+      match /movements/{movementId} {
+        allow list: if isOwner(userId);
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(movementId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(movementId) &&
+                         incoming().userId == request.auth.uid &&
+                         incoming().keys().hasAll([
+                           'localId', 'userId', 'productId', 'movementType',
+                           'quantity', 'packageCount', 'dateMillis',
+                           'isReversed', 'isDeleted', 'updatedAtMillis',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'localId', 'userId', 'productId', 'variantId', 'movementType',
+                           'quantity', 'packageCount', 'dateMillis', 'dateFormatted',
+                           'source', 'destinationId', 'destinationName', 'destinationType',
+                           'reason', 'responsiblePerson', 'referenceNumber', 'notes',
+                           'isReversed', 'reversedByMovementId', 'isDeleted',
+                           'updatedAtMillis', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidMovement(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(movementId) &&
+                         isValidMovement(incoming()) &&
+                         incoming().userId == existing().userId &&
+                         incoming().localId == existing().localId &&
+                         incoming().productId == existing().productId &&
+                         incoming().createdAt == existing().createdAt &&
+                         (
+                           // Action: reverse movement
+                           (!existing().isReversed && incoming().isReversed &&
+                            incoming().diff(existing()).affectedKeys().hasOnly([
+                              'isReversed', 'reversedByMovementId', 'updatedAtMillis', 'updatedAt'
+                            ])) ||
+                           // Action: soft-delete or full record update
+                           incoming().diff(existing()).affectedKeys().hasOnly([
+                             'variantId', 'movementType', 'quantity', 'packageCount',
+                             'dateMillis', 'dateFormatted', 'source', 'destinationId',
+                             'destinationName', 'destinationType', 'reason',
+                             'responsiblePerson', 'referenceNumber', 'notes',
+                             'isReversed', 'reversedByMovementId', 'isDeleted',
+                             'updatedAtMillis', 'updatedAt'
+                           ])
+                         );
+
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(movementId);
+      }
+
+      match /destinations/{destinationId} {
+        allow list: if isOwner(userId);
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(destinationId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(destinationId) &&
+                         incoming().userId == request.auth.uid &&
+                         incoming().keys().hasAll([
+                           'localId', 'userId', 'name', 'type',
+                           'updatedAtMillis', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'localId', 'userId', 'name', 'type', 'commune', 'province',
+                           'address', 'contactPerson', 'phone', 'notes',
+                           'updatedAtMillis', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidDestination(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(destinationId) &&
+                         isValidDestination(incoming()) &&
+                         incoming().userId == existing().userId &&
+                         incoming().localId == existing().localId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'name', 'type', 'commune', 'province', 'address',
+                           'contactPerson', 'phone', 'notes', 'updatedAtMillis', 'updatedAt'
+                         ]);
+
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(destinationId);
+      }
+
+      match /health_probes/{probeId} {
+        allow list: if isOwner(userId);
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(probeId);
+        allow create: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(probeId) &&
+                         incoming().userId == request.auth.uid &&
+                         incoming().keys().hasAll(['userId', 'probeId', 'createdAt']) &&
+                         incoming().keys().hasOnly(['userId', 'probeId', 'createdAt']) &&
+                         isValidHealthProbe(incoming());
+        allow update: if false;
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(probeId);
+      }
+    }
+  }
+}

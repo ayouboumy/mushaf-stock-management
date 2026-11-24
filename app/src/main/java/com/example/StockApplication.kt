@@ -4,7 +4,6 @@ import android.app.Application
 import android.content.Context
 import android.util.Log
 import com.google.firebase.FirebaseApp
-import com.google.firebase.FirebaseOptions
 
 class StockApplication : Application() {
 
@@ -29,20 +28,13 @@ class StockApplication : Application() {
             synchronized(this) {
                 if (isInitialized && FirebaseApp.getApps(ctx).isNotEmpty()) return
                 try {
-                    val apps = FirebaseApp.getApps(ctx)
-                    if (apps.isEmpty()) {
-                        val options = FirebaseOptions.Builder()
-                            .setApplicationId("1:853719870602:android:e77d76148604affc9dd173")
-                            .setApiKey("AIzaSyCr1ToMuR2ejNwkRmnRcRU0zUZdcIfnUQM")
-                            .setProjectId("mushaf-stock")
-                            .setStorageBucket("mushaf-stock.firebasestorage.app")
-                            .build()
-                        FirebaseApp.initializeApp(ctx, options)
-                        Log.i("StockApplication", "FirebaseApp initialized with explicit FirebaseOptions successfully")
+                    if (FirebaseApp.getApps(ctx).isEmpty()) {
+                        FirebaseApp.initializeApp(ctx)
+                        Log.i("StockApplication", "FirebaseApp initialized from google-services.json")
                     }
                     isInitialized = true
                 } catch (e: Exception) {
-                    Log.e("StockApplication", "Error initializing FirebaseApp with options", e)
+                    Log.e("StockApplication", "Error initializing FirebaseApp", e)
                 }
             }
         }

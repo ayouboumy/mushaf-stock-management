@@ -1,5 +1,7 @@
 package com.example.data.repository
 
+import android.content.Context
+import com.example.R
 import com.example.data.db.AppDatabase
 import com.example.data.entity.AuditLogEntity
 import com.example.data.entity.DestinationEntity
@@ -12,8 +14,10 @@ import com.example.data.model.PeriodStockResult
 import com.example.data.model.StockCalculator
 import com.example.data.model.StockStatus
 import com.example.data.model.ValidationResult
+import com.example.data.sync.FirebaseSyncManager
 import com.example.data.sync.SyncEntityType
 import com.example.data.sync.UniqueIdGenerator
+import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -24,27 +28,54 @@ import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
-class StockRepository(private val database: AppDatabase) {
+class StockRepository(
+    private val database: AppDatabase,
+    firestore: FirebaseFirestore? = null,
+    databaseId: String = "",
+    context: Context? = com.example.StockApplication.appContext
+) {
+
+    constructor(
+        context: Context,
+        database: AppDatabase = AppDatabase.getDatabase(context.applicationContext)
+    ) : this(
+        database = database,
+        firestore = resolveFirestore(context.applicationContext),
+        databaseId = context.applicationContext.getString(R.string.firestore_database_id),
+        context = context.applicationContext
+    )
+
+    companion object {
+        private fun resolveFirestore(appContext: Context): FirebaseFirestore {
+            com.example.StockApplication.initializeFirebase(appContext)
+            return FirebaseFirestore.getInstance(appContext.getString(R.string.firestore_database_id))
+        }
+    }
 
     private val productDao = database.productDao()
     private val variantDao = database.productVariantDao()
     private val movementDao = database.stockMovementDao()
     private val destinationDao = database.destinationDao()
     private val auditLogDao = database.auditLogDao()
-    val syncManager = com.example.data.sync.FirebaseSyncManager(database)
+    val syncManager = FirebaseSyncManager(
+        database = database,
+        context = context,
+        databaseId = databaseId,
+        injectedFirestore = firestore
+    )
 
-    init {
+    fun startCloudSyncIfAuthenticated() {
         syncManager.startRealtimeListeners()
         syncManager.startAutoSync()
+    }
+
+    fun stopCloudSync() {
+        syncManager.stopCloudSync()
     }
 
     // Diagnostic & Health Verification
     suspend fun runComprehensiveFirestoreDiagnostic(): com.example.data.sync.FirestoreDiagnosticReport {
         return syncManager.runComprehensiveDiagnostic()
-    }
-
-    suspend fun clearAndVerifyItemsCollection(): String {
-        return syncManager.clearAndVerifyItemsCollection()
     }
 
     fun ensureCollectionListenersActive() {

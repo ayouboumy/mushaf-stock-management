@@ -16,28 +16,21 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Badge
 import androidx.compose.material.icons.filled.CloudSync
-import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Login
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
@@ -51,7 +44,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -60,9 +52,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.example.data.model.CloudSyncState
-import com.example.ui.StockViewModel
+import com.example.ui.auth.GoogleSignInButton
 import com.example.ui.theme.AppBackground
 import com.example.ui.theme.AppBorder
 import com.example.ui.theme.AppSurface
@@ -81,19 +71,16 @@ import com.example.ui.theme.TextSecondary
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SignUpOnboardingScreen(
-    viewModel: StockViewModel,
+    onAuthSuccess: () -> Unit,
+    onSavePendingProfile: (fullName: String, role: String, phone: String, adminCode: String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val syncState by viewModel.cloudSyncState.collectAsStateWithLifecycle()
-
     var fullName by remember { mutableStateOf("") }
-    var role by remember { mutableStateOf("") }
-    var email by remember { mutableStateOf("") }
+    var role by remember { mutableStateOf("المكلف بالمستودع والتسليم") }
     var phone by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var showPassword by remember { mutableStateOf(false) }
+    var adminCode by remember { mutableStateOf("") }
+    var showAdminCode by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
-    var isSubmitting by remember { mutableStateOf(false) }
 
     val roleSuggestions = listOf(
         "المكلف بالمستودع والتسليم",
@@ -165,7 +152,7 @@ fun SignUpOnboardingScreen(
                 )
             }
 
-            // Welcome & Clean Profile Setup Card
+            // Google Sign-In & Profile Setup Card
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(20.dp),
@@ -197,14 +184,14 @@ fun SignUpOnboardingScreen(
                         }
                         Column {
                             Text(
-                                text = "تسجيل مستخدم جديد وبدء العمل",
+                                text = "تسجيل الدخول بحساب Google",
                                 fontSize = 15.5.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = TextPrimary,
                                 fontFamily = TajawalFontFamily
                             )
                             Text(
-                                text = "يرجى إدخال بياناتك الوظيفية لتوثيق سندات الصرف والمزامنة",
+                                text = "قم بتسجيل الدخول عبر Google لحماية بياناتك وتفعيل المزامنة السحابية الآمنة",
                                 fontSize = 11.5.sp,
                                 color = TextSecondary,
                                 fontFamily = TajawalFontFamily
@@ -212,15 +199,15 @@ fun SignUpOnboardingScreen(
                         }
                     }
 
-                    // Full Name Input
+                    // Full Name Input (optional override; falls back to Google display name)
                     OutlinedTextField(
                         value = fullName,
                         onValueChange = {
                             fullName = it
                             errorMessage = null
                         },
-                        label = { Text("الاسم الكامل للمستخدم *", fontFamily = TajawalFontFamily, fontSize = 12.5.sp) },
-                        placeholder = { Text("مثال: عبد الحق المرابط", fontFamily = TajawalFontFamily, fontSize = 12.sp, color = TextMuted) },
+                        label = { Text("الاسم الكامل في السندات (اختياري)", fontFamily = TajawalFontFamily, fontSize = 12.5.sp) },
+                        placeholder = { Text("سيُستخدم اسم حساب Google تلقائياً عند تركه فارغاً", fontFamily = TajawalFontFamily, fontSize = 12.sp, color = TextMuted) },
                         leadingIcon = { Icon(Icons.Default.Person, contentDescription = null, tint = EmeraldPrimary) },
                         modifier = Modifier
                             .fillMaxWidth()
@@ -240,7 +227,7 @@ fun SignUpOnboardingScreen(
                             role = it
                             errorMessage = null
                         },
-                        label = { Text("الصفة / المسمى الوظيفي *", fontFamily = TajawalFontFamily, fontSize = 12.5.sp) },
+                        label = { Text("الصفة / المسمى الوظيفي", fontFamily = TajawalFontFamily, fontSize = 12.5.sp) },
                         placeholder = { Text("مثال: المكلف بالمستودع والتسليم", fontFamily = TajawalFontFamily, fontSize = 12.sp, color = TextMuted) },
                         leadingIcon = { Icon(Icons.Default.Badge, contentDescription = null, tint = EmeraldPrimary) },
                         modifier = Modifier
@@ -286,33 +273,10 @@ fun SignUpOnboardingScreen(
                         }
                     }
 
-                    // Email Input
-                    OutlinedTextField(
-                        value = email,
-                        onValueChange = {
-                            email = it
-                            errorMessage = null
-                        },
-                        label = { Text("البريد الإلكتروني المهني *", fontFamily = TajawalFontFamily, fontSize = 12.5.sp) },
-                        placeholder = { Text("user@habous.gov.ma", fontFamily = TajawalFontFamily, fontSize = 12.sp, color = TextMuted) },
-                        leadingIcon = { Icon(Icons.Default.Email, contentDescription = null, tint = EmeraldPrimary) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("signup_email_input"),
-                        shape = RoundedCornerShape(12.dp),
-                        singleLine = true,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = EmeraldPrimary,
-                            unfocusedBorderColor = AppBorder
-                        )
-                    )
-
                     // Phone Input
                     OutlinedTextField(
                         value = phone,
-                        onValueChange = {
-                            phone = it
-                        },
+                        onValueChange = { phone = it },
                         label = { Text("رقم الهاتف للتواصل (اختياري)", fontFamily = TajawalFontFamily, fontSize = 12.5.sp) },
                         placeholder = { Text("06XXXXXXXX", fontFamily = TajawalFontFamily, fontSize = 12.sp, color = TextMuted) },
                         leadingIcon = { Icon(Icons.Default.Phone, contentDescription = null, tint = TextMuted) },
@@ -327,41 +291,11 @@ fun SignUpOnboardingScreen(
                         )
                     )
 
-                    // Password Input (Firebase Auth)
-                    OutlinedTextField(
-                        value = password,
-                        onValueChange = { password = it },
-                        label = { Text("كلمة المرور للحساب السحابي (اختياري)", fontFamily = TajawalFontFamily, fontSize = 12.5.sp) },
-                        placeholder = { Text("6 أحرف على الأقل لحماية الحساب", fontFamily = TajawalFontFamily, fontSize = 12.sp, color = TextMuted) },
-                        leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = TextMuted) },
-                        trailingIcon = {
-                            IconButton(onClick = { showPassword = !showPassword }) {
-                                Icon(
-                                    imageVector = if (showPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                    contentDescription = null,
-                                    tint = TextMuted
-                                )
-                            }
-                        },
-                        visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("signup_password_input"),
-                        shape = RoundedCornerShape(12.dp),
-                        singleLine = true,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = EmeraldPrimary,
-                            unfocusedBorderColor = AppBorder
-                        )
-                    )
-
                     // Admin Secret Code Input (Optional, for delete/clear privilege)
-                    var adminCode by remember { mutableStateOf("") }
-                    var showAdminCode by remember { mutableStateOf(false) }
                     OutlinedTextField(
                         value = adminCode,
                         onValueChange = { adminCode = it },
-                        label = { Text("رمز المدير العام (اختياري - لفتح صلاحية تصفير وحذف البيانات)", fontFamily = TajawalFontFamily, fontSize = 12.sp) },
+                        label = { Text("رمز المدير العام (اختياري - لفتح صلاحية التصفير)", fontFamily = TajawalFontFamily, fontSize = 12.sp) },
                         placeholder = { Text("•••• (اتركه فارغاً للمستخدم العادي)", fontFamily = TajawalFontFamily, fontSize = 11.5.sp, color = TextMuted) },
                         leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = EmeraldPrimary) },
                         trailingIcon = {
@@ -413,7 +347,7 @@ fun SignUpOnboardingScreen(
                                 modifier = Modifier.size(24.dp)
                             )
                             Text(
-                                text = "مزامنة سحابية فورية: بمجرد الدخول، سيتم جلب ومزامنة أحدث أرقام المخزون وسندات التسليم من الأجهزة الأخرى تلقائياً.",
+                                text = "مزامنة سحابية آمنة: بمجرد تسجيل الدخول بحساب Google، سيتم حفظ وربط سجلات المخزون وسندات التسليم بحسابك تلقائياً.",
                                 fontSize = 11.5.sp,
                                 color = TextPrimary,
                                 fontFamily = TajawalFontFamily,
@@ -422,70 +356,20 @@ fun SignUpOnboardingScreen(
                         }
                     }
 
-                    // Submit Button
-                    Button(
-                        onClick = {
-                            val trimmedName = fullName.trim()
-                            val trimmedRole = role.trim()
-                            val trimmedEmail = email.trim()
-
-                            if (trimmedName.isBlank()) {
-                                errorMessage = "يرجى إدخال الاسم الكامل للمستخدم"
-                                return@Button
-                            }
-                            if (trimmedRole.isBlank()) {
-                                errorMessage = "يرجى تحديد أو إدخال الصفة الوظيفية"
-                                return@Button
-                            }
-                            if (trimmedEmail.isBlank() || !trimmedEmail.contains("@")) {
-                                errorMessage = "يرجى إدخال بريد إلكتروني صحيح"
-                                return@Button
-                            }
-
-                            isSubmitting = true
-                            viewModel.registerAndSignIn(
-                                fullName = trimmedName,
-                                role = trimmedRole,
-                                email = trimmedEmail,
-                                phone = phone.trim(),
-                                password = password.trim(),
-                                adminSecretCode = adminCode.trim()
+                    GoogleSignInButton(
+                        onBeforeSignIn = {
+                            errorMessage = null
+                            onSavePendingProfile(
+                                fullName.trim(),
+                                role.trim(),
+                                phone.trim(),
+                                adminCode.trim()
                             )
+                            true
                         },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(50.dp)
-                            .testTag("signup_submit_button"),
-                        shape = RoundedCornerShape(14.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary),
-                        enabled = !isSubmitting && fullName.isNotBlank() && role.isNotBlank() && email.isNotBlank()
-                    ) {
-                        if (isSubmitting || syncState == CloudSyncState.SYNCING) {
-                            CircularProgressIndicator(
-                                color = Color.White,
-                                modifier = Modifier.size(20.dp),
-                                strokeWidth = 2.dp
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Text(
-                                text = "جاري تفعيل الحساب ومزامنة المخزون...",
-                                fontFamily = TajawalFontFamily,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.5.sp,
-                                color = Color.White
-                            )
-                        } else {
-                            Icon(Icons.Default.Login, contentDescription = null, modifier = Modifier.size(20.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "تأكيد التسجيل والدخول إلى المنظومة",
-                                fontFamily = TajawalFontFamily,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.5.sp,
-                                color = Color.White
-                            )
-                        }
-                    }
+                        onAuthSuccess = onAuthSuccess,
+                        onAuthError = { msg -> errorMessage = msg }
+                    )
                 }
             }
 

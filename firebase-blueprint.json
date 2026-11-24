@@ -1,0 +1,153 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated staff member profile stored privately under their UID.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID of the owner." },
+        "fullName": { "type": "string", "description": "Staff member display name." },
+        "jobTitle": { "type": "string", "description": "Staff member job title or role label." },
+        "email": { "type": "string", "description": "Staff email address." },
+        "phone": { "type": "string", "description": "Optional phone number." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp set via FieldValue.serverTimestamp()." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp updated via FieldValue.serverTimestamp()." }
+      },
+      "required": ["userId", "fullName", "createdAt", "updatedAt"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Mushaf product catalog item owned by a user.",
+      "type": "object",
+      "properties": {
+        "localId": { "type": "integer", "description": "Room numeric primary key (document ID)." },
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "nameArabic": { "type": "string", "description": "Arabic product name." },
+        "nameFrench": { "type": "string", "description": "French product name." },
+        "category": { "type": "string", "description": "Product category." },
+        "formatType": { "type": "string", "description": "Mushaf format size/type." },
+        "unit": { "type": "string", "description": "Counting unit." },
+        "packageQuantity": { "type": "integer", "description": "Units per package." },
+        "minimumStock": { "type": "integer", "description": "Low-stock alert threshold." },
+        "initialStock": { "type": "integer", "description": "Opening stock balance." },
+        "notes": { "type": "string", "description": "Optional notes." },
+        "active": { "type": "boolean", "description": "Whether the product is active." },
+        "updatedAtMillis": { "type": "integer", "description": "Epoch milliseconds for local sync ordering." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp via FieldValue.serverTimestamp()." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server update timestamp via FieldValue.serverTimestamp()." }
+      },
+      "required": ["localId", "userId", "nameArabic", "category", "formatType", "unit", "packageQuantity", "minimumStock", "initialStock", "active", "updatedAtMillis", "createdAt", "updatedAt"]
+    },
+    "ProductVariant": {
+      "title": "ProductVariant",
+      "description": "Sub-variant or translation of a Mushaf product.",
+      "type": "object",
+      "properties": {
+        "localId": { "type": "integer", "description": "Room numeric primary key." },
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "productId": { "type": "integer", "description": "Parent product local ID." },
+        "nameArabic": { "type": "string", "description": "Variant Arabic name." },
+        "nameFrench": { "type": "string", "description": "Variant French name." },
+        "code": { "type": "string", "description": "Short variant code." },
+        "initialStock": { "type": "integer", "description": "Opening balance." },
+        "minimumStock": { "type": "integer", "description": "Low-stock threshold." },
+        "packageQuantity": { "type": "integer", "description": "Units per box." },
+        "notes": { "type": "string", "description": "Optional notes." },
+        "active": { "type": "boolean", "description": "Whether variant is active." },
+        "updatedAtMillis": { "type": "integer", "description": "Epoch milliseconds for sync ordering." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server update timestamp." }
+      },
+      "required": ["localId", "userId", "productId", "nameArabic", "initialStock", "minimumStock", "packageQuantity", "active", "updatedAtMillis", "createdAt", "updatedAt"]
+    },
+    "StockMovement": {
+      "title": "StockMovement",
+      "description": "Stock incoming, outgoing, or adjustment movement record.",
+      "type": "object",
+      "properties": {
+        "localId": { "type": "integer", "description": "Room numeric primary key." },
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "productId": { "type": "integer", "description": "Related product local ID." },
+        "variantId": { "type": "integer", "description": "Optional variant local ID." },
+        "movementType": { "type": "string", "enum": ["STOCK_IN", "STOCK_OUT", "ADJUSTMENT", "OPENING_BALANCE"], "description": "Movement type." },
+        "quantity": { "type": "integer", "description": "Quantity moved (signed for ADJUSTMENT)." },
+        "packageCount": { "type": "integer", "description": "Number of packages." },
+        "dateMillis": { "type": "integer", "description": "Voucher date in epoch millis." },
+        "dateFormatted": { "type": "string", "description": "Formatted date string." },
+        "source": { "type": "string", "description": "Incoming stock source." },
+        "destinationId": { "type": "integer", "description": "Optional destination local ID." },
+        "destinationName": { "type": "string", "description": "Destination name." },
+        "destinationType": { "type": "string", "description": "Destination type." },
+        "reason": { "type": "string", "description": "Adjustment reason." },
+        "responsiblePerson": { "type": "string", "description": "Responsible staff name." },
+        "referenceNumber": { "type": "string", "description": "Voucher reference number." },
+        "notes": { "type": "string", "description": "Optional notes." },
+        "isReversed": { "type": "boolean", "description": "Whether the movement has been reversed." },
+        "reversedByMovementId": { "type": "integer", "description": "Optional reversing movement local ID." },
+        "isDeleted": { "type": "boolean", "description": "Soft-delete flag." },
+        "updatedAtMillis": { "type": "integer", "description": "Epoch milliseconds for sync ordering." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server update timestamp." }
+      },
+      "required": ["localId", "userId", "productId", "movementType", "quantity", "packageCount", "dateMillis", "isReversed", "isDeleted", "updatedAtMillis", "createdAt", "updatedAt"]
+    },
+    "Destination": {
+      "title": "Destination",
+      "description": "Distribution destination (mosque, institution, association).",
+      "type": "object",
+      "properties": {
+        "localId": { "type": "integer", "description": "Room numeric primary key." },
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "name": { "type": "string", "description": "Destination name." },
+        "type": { "type": "string", "description": "Destination category." },
+        "commune": { "type": "string", "description": "Commune name." },
+        "province": { "type": "string", "description": "Province name." },
+        "address": { "type": "string", "description": "Full address." },
+        "contactPerson": { "type": "string", "description": "Contact person." },
+        "phone": { "type": "string", "description": "Contact phone." },
+        "notes": { "type": "string", "description": "Optional notes." },
+        "updatedAtMillis": { "type": "integer", "description": "Epoch milliseconds for sync ordering." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server update timestamp." }
+      },
+      "required": ["localId", "userId", "name", "type", "updatedAtMillis", "createdAt", "updatedAt"]
+    },
+    "HealthProbe": {
+      "title": "HealthProbe",
+      "description": "Ephemeral diagnostic probe document created and deleted during self-check.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "probeId": { "type": "string", "description": "Probe identifier." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp." }
+      },
+      "required": ["userId", "probeId", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private authenticated user profile."
+    },
+    "/users/{userId}/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "User's Mushaf products collection."
+    },
+    "/users/{userId}/variants/{variantId}": {
+      "schema": { "$ref": "#/entities/ProductVariant" },
+      "description": "User's product variants collection."
+    },
+    "/users/{userId}/movements/{movementId}": {
+      "schema": { "$ref": "#/entities/StockMovement" },
+      "description": "User's stock movements collection."
+    },
+    "/users/{userId}/destinations/{destinationId}": {
+      "schema": { "$ref": "#/entities/Destination" },
+      "description": "User's distribution destinations collection."
+    },
+    "/users/{userId}/health_probes/{probeId}": {
+      "schema": { "$ref": "#/entities/HealthProbe" },
+      "description": "Ephemeral diagnostic health probe documents."
+    }
+  }
+}

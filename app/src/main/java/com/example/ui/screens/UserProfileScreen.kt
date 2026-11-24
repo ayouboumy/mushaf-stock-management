@@ -49,10 +49,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -64,7 +66,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.model.CloudSyncState
 import com.example.data.sync.CloudSyncDiagnostic
 import com.example.ui.StockViewModel
+import com.example.ui.auth.signOutWithCleanup
 import com.example.ui.components.AppHeader
+import kotlinx.coroutines.launch
 import com.example.ui.theme.AppBackground
 import com.example.ui.theme.AppBorder
 import com.example.ui.theme.AppSurface
@@ -87,6 +91,8 @@ fun UserProfileScreen(
         viewModel.navigateBack()
     }
 
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val currentUser by viewModel.currentUser.collectAsStateWithLifecycle()
     val syncState by viewModel.cloudSyncState.collectAsStateWithLifecycle()
     val syncDiagnostic by viewModel.syncDiagnostic.collectAsStateWithLifecycle()
@@ -357,7 +363,13 @@ fun UserProfileScreen(
                         }
 
                         androidx.compose.material3.OutlinedButton(
-                            onClick = { viewModel.logoutOrSwitchUser() },
+                            onClick = {
+                                scope.launch {
+                                    signOutWithCleanup(context) {
+                                        viewModel.prepareForSignOut()
+                                    }
+                                }
+                            },
                             modifier = Modifier.fillMaxWidth().height(46.dp).testTag("logout_switch_user_btn"),
                             colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFC0392B)),
                             border = BorderStroke(1.dp, Color(0xFFE74C3C).copy(alpha = 0.5f)),
@@ -365,7 +377,7 @@ fun UserProfileScreen(
                         ) {
                             Icon(imageVector = Icons.Default.Login, contentDescription = null, modifier = Modifier.size(18.dp), tint = Color(0xFFC0392B))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("تسجيل الخروج / تبديل المستخدم", fontFamily = TajawalFontFamily, fontWeight = FontWeight.Bold)
+                            Text("تسجيل الخروج / تبديل حساب Google", fontFamily = TajawalFontFamily, fontWeight = FontWeight.Bold)
                         }
                     }
                 }
@@ -427,7 +439,7 @@ fun UserProfileScreen(
                                             )
                                         }
                                         Text(
-                                            text = "قاعدة البيانات الافتراضية (default) مفعلة وجاهزة للمزامنة اللحظية بين الأجهزة.",
+                                            text = "قاعدة بيانات Firestore السحابية مفعلة وجاهزة للمزامنة الآمنة بحساب Google الخاص بك.",
                                             fontFamily = TajawalFontFamily,
                                             color = TextSecondary,
                                             fontSize = 11.5.sp
@@ -525,7 +537,7 @@ fun UserProfileScreen(
                                             )
                                         }
                                         Text(
-                                            text = "في منصة Firebase Console > Firestore Database > Rules، يرجى تفعيل القواعد بالسماح بالقراءة والكتابة: allow read, write: if true;",
+                                            text = "يرجى التأكد من تسجيل الدخول بحساب Google المصرّح له وأن قواعد الأمان في Firestore منشورة وتطابق معرف المستخدم.",
                                             fontFamily = TajawalFontFamily,
                                             color = TextPrimary,
                                             fontSize = 11.5.sp
